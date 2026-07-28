@@ -1,0 +1,18 @@
+{
+  "name": "Echo.Harness.Application",
+  "rootNamespace": "Echo.Harness.Application",
+  "references": [
+    "Echo.Harness.Domain",
+    "Echo.Harness.Contracts",
+    "UniTask"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": true
+}

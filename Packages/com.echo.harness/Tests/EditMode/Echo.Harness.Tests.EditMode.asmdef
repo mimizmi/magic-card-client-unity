@@ -1,0 +1,37 @@
+{
+  "name": "Echo.Harness.Tests.EditMode",
+  "rootNamespace": "Echo.Harness.Tests.EditMode",
+  "references": [
+    "Echo.Harness.Domain",
+    "Echo.Harness.Contracts",
+    "Echo.Harness.Application",
+    "Echo.Harness.Infrastructure",
+    "Echo.Harness.Presentation",
+    "Echo.Harness.Bootstrap",
+    "Echo.Harness.TestKit",
+    "UniTask",
+    "R3.Unity",
+    "VContainer",
+    "Unity.Addressables"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "R3.dll",
+    "Microsoft.Bcl.TimeProvider.dll",
+    "Microsoft.Bcl.AsyncInterfaces.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "noEngineReferences": false
+}

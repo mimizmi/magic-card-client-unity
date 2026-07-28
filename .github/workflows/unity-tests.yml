@@ -1,0 +1,60 @@
+name: harness-verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  architecture:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Verify architecture and package pins
+        shell: pwsh
+        run: ./Tools/ci/verify-architecture.ps1
+
+  unity-tests:
+    needs: architecture
+    runs-on: [self-hosted, Windows, unity-6000.2.7f2]
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install pinned NuGetForUnity CLI
+        shell: pwsh
+        run: |
+          dotnet tool install --global NuGetForUnity.Cli --version 4.5.0
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Restore packages.config
+        shell: pwsh
+        run: ./Tools/ci/restore-nuget.ps1
+
+      - name: Run EditMode and PlayMode tests
+        shell: pwsh
+        env:
+          UNITY_EDITOR_PATH: ${{ vars.UNITY_EDITOR_PATH_6000_2_7F2 }}
+        run: ./Tools/ci/run-unity-tests.ps1 -PreferConnectedEditor:$false
+
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-harness-test-results
+          path: |
+            Artifacts/
+            Logs/
+          if-no-files-found: warn
+          retention-days: 14

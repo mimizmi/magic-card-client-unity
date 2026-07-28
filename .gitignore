@@ -1,0 +1,51 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# IDE and generated project files
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity and platform artifacts
+*.apk
+*.aab
+*.unitypackage
+sysinfo.txt
+crashlytics-build.properties
+
+# Addressables generated content
+/ServerData/
+/Assets/StreamingAssets/aa/
+
+# NuGetForUnity restored binaries are reproducible from packages.config
+/Assets/Packages/
+
+# Test and CI output
+/TestResults/
+/Artifacts/
+/coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

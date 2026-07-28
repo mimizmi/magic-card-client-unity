@@ -1,0 +1,14 @@
+{
+  "name": "Echo.Harness.Domain",
+  "rootNamespace": "Echo.Harness.Domain",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": true
+}

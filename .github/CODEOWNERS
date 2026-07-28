@@ -1,0 +1,8 @@
+# Replace the placeholder team before enabling required CODEOWNERS review.
+* @echo-game/client-maintainers
+
+/Packages/com.echo.harness/Runtime/Contracts/ @echo-game/client-maintainers @echo-game/server-maintainers
+/Packages/com.echo.harness/Fixtures/ @echo-game/client-maintainers @echo-game/server-maintainers
+/Packages/manifest.json @echo-game/client-maintainers
+/Assets/packages.config @echo-game/client-maintainers
+/.github/workflows/ @echo-game/build-maintainers

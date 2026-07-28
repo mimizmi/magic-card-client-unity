@@ -1,0 +1,19 @@
+{
+  "name": "com.echo.harness",
+  "version": "0.1.0",
+  "displayName": "Echo Migration Harness",
+  "description": "Architecture contracts, deterministic test doubles, and verification seams for the Echo Unity migration. Contains no game implementation.",
+  "unity": "6000.2",
+  "license": "UNLICENSED",
+  "author": {
+    "name": "Echo"
+  },
+  "dependencies": {
+    "com.cysharp.r3": "1.3.1",
+    "com.cysharp.unitask": "2.5.11",
+    "com.unity.addressables": "2.7.6",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.test-framework": "1.6.0",
+    "jp.hadashikick.vcontainer": "1.19.0"
+  }
+}

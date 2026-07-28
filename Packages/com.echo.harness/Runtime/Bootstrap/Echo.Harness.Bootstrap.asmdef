@@ -1,0 +1,21 @@
+{
+  "name": "Echo.Harness.Bootstrap",
+  "rootNamespace": "Echo.Harness.Bootstrap",
+  "references": [
+    "Echo.Harness.Domain",
+    "Echo.Harness.Contracts",
+    "Echo.Harness.Application",
+    "Echo.Harness.Infrastructure",
+    "Echo.Harness.Presentation",
+    "VContainer"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
