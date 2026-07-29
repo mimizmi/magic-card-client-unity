@@ -32,6 +32,7 @@
 | `Packages/com.echo.harness/Runtime/Application/Session/IProtocolSession.cs` | the session contract | 4 |
 | `Packages/com.echo.harness/Runtime/Application/Session/ProtocolSession.cs` | lifecycle, pump, dispatch, correlation | 4-8 |
 | `Packages/com.echo.harness/Tests/EditMode/ProtocolCodecTests.cs` | codec and pairing table | 1-2 |
+| `Packages/com.echo.harness/Tests/EditMode/ProtocolTestFrames.cs` | one shared frame builder for all three session test fixtures | 4 |
 | `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionLifecycleTests.cs` | state machine, pump, faults, transport failure | 4 |
 | `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionDispatchTests.cs` | subscribe, dispatch, isolation, send, heartbeat | 5, 7 |
 | `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionRequestTests.cs` | request/response, single-flight, timeout, RTT probe | 6, 8 |
@@ -595,27 +596,52 @@ synchronously from EnqueueInbound so session tests need no polling."
 - Create: `Packages/com.echo.harness/Runtime/Application/Session/SessionDiagnostics.cs`
 - Create: `Packages/com.echo.harness/Runtime/Application/Session/IProtocolSession.cs`
 - Create: `Packages/com.echo.harness/Runtime/Application/Session/ProtocolSession.cs`
+- Create: `Packages/com.echo.harness/Tests/EditMode/ProtocolTestFrames.cs`
 - Test: `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionLifecycleTests.cs`
 
 **Interfaces:**
 - Consumes: `ITransport`, `TransportMessage`, `IClock`, `ProtocolCodec`, `MessageId`.
-- Produces: `SessionState` (enum: `Disconnected`, `Connecting`, `Connected`, `Faulted`); `SessionFaultKind` (enum: `UnknownMessageId`, `MalformedPayload`, `CorrelationMismatch`, `SubscriberFailure`, `TransportFailure`); `SessionFault` (readonly struct with `Kind`, `MessageId`, `Diagnostic`); `IProtocolSession` with `State`, `StartAsync`, `StopAsync`, `SendAsync`, `RequestAsync`, `ProbeRoundTripAsync`, `Subscribe<TPayload>`, `SubscribeToFaults`, `Dispose`; `ProtocolSession(ITransport, IClock)`.
+- Produces: `SessionState` (enum: `Disconnected`, `Connecting`, `Connected`, `Faulted`); `SessionFaultKind` (enum: `UnknownMessageId`, `MalformedPayload`, `CorrelationMismatch`, `SubscriberFailure`, `TransportFailure`); `SessionFault` (readonly struct with `Kind`, `MessageId`, `Diagnostic`); `IProtocolSession` with `State`, `StartAsync`, `StopAsync`, `SendAsync`, `RequestAsync`, `ProbeRoundTripAsync`, `Subscribe<TPayload>`, `SubscribeToFaults`, `Dispose`; `ProtocolSession(ITransport, IClock)`; test helper `ProtocolTestFrames.Frame(MessageId, string)` and `ProtocolTestFrames.Bodyless(MessageId)`, which Tasks 5-8 import with `using static`.
 
 This task implements only `State`, `StartAsync`, `StopAsync`, `SubscribeToFaults`, `Dispose`, and the pump's decode-and-fault path. Tasks 5-8 fill in the rest of the interface; declare the remaining members now and have them throw `NotImplementedException` so the file compiles.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionLifecycleTests.cs`:
+First create the shared frame builder, `Packages/com.echo.harness/Tests/EditMode/ProtocolTestFrames.cs`.
+All three session test fixtures need it; one copy keeps a change to the frame
+shape from having to be made in three places:
+
+```csharp
+using System.Text;
+using Echo.Harness.Application;
+using Echo.Harness.Contracts;
+
+namespace Echo.Harness.Tests.EditMode
+{
+    internal static class ProtocolTestFrames
+    {
+        /// <summary>Builds an inbound transport message from a JSON body.</summary>
+        public static TransportMessage Frame(MessageId id, string json) =>
+            new TransportMessage(id, Encoding.UTF8.GetBytes(json));
+
+        /// <summary>Builds an inbound transport message with no body at all.</summary>
+        public static TransportMessage Bodyless(MessageId id) =>
+            new TransportMessage(id, System.Array.Empty<byte>());
+    }
+}
+```
+
+Then create `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionLifecycleTests.cs`:
 
 ```csharp
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
+using static Echo.Harness.Tests.EditMode.ProtocolTestFrames;
 
 namespace Echo.Harness.Tests.EditMode
 {
@@ -623,9 +649,6 @@ namespace Echo.Harness.Tests.EditMode
     {
         private static ProtocolSession NewSession(FakeTransport transport) =>
             new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
-
-        private static TransportMessage Frame(MessageId id, string json) =>
-            new TransportMessage(id, Encoding.UTF8.GetBytes(json));
 
         [Test]
         public void StartAsync_ConnectsTheTransportAndReportsConnected()
@@ -1093,14 +1116,12 @@ using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
+using static Echo.Harness.Tests.EditMode.ProtocolTestFrames;
 
 namespace Echo.Harness.Tests.EditMode
 {
     public sealed class ProtocolSessionDispatchTests
     {
-        private static TransportMessage Frame(MessageId id, string json) =>
-            new TransportMessage(id, Encoding.UTF8.GetBytes(json));
-
         private static ProtocolSession StartedSession(FakeTransport transport)
         {
             var session = new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
@@ -1116,9 +1137,14 @@ namespace Echo.Harness.Tests.EditMode
             GameOverEventDto received = null;
             session.Subscribe<GameOverEventDto>(MessageId.GameOverEvent, dto => received = dto);
 
-            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+            transport.EnqueueInbound(Frame(
+                MessageId.GameOverEvent, "{\"winner_seat\":1,\"reason\":\"surrender\"}"));
 
+            // Asserting the field values, not just non-null: a handler wired to
+            // the wrong id would still receive a default-constructed instance.
             Assert.That(received, Is.Not.Null);
+            Assert.That(received.WinnerSeat, Is.EqualTo(1));
+            Assert.That(received.Reason, Is.EqualTo("surrender"));
         }
 
         [Test]
@@ -1419,15 +1445,13 @@ using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
+using static Echo.Harness.Tests.EditMode.ProtocolTestFrames;
 
 namespace Echo.Harness.Tests.EditMode
 {
     public sealed class ProtocolSessionRequestTests
     {
         private static readonly TimeSpan Generous = TimeSpan.FromSeconds(30);
-
-        private static TransportMessage Frame(MessageId id, string json) =>
-            new TransportMessage(id, Encoding.UTF8.GetBytes(json));
 
         private static ProtocolSession StartedSession(FakeTransport transport, ManualClock clock)
         {
@@ -1711,7 +1735,7 @@ Append to `ProtocolSessionDispatchTests.cs`, inside the class:
             var transport = new FakeTransport();
             using var session = StartedSession(transport);
 
-            transport.EnqueueInbound(new TransportMessage(MessageId.Ping, Array.Empty<byte>()));
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
 
             Assert.That(transport.Sent, Has.Count.EqualTo(1));
             Assert.That(transport.Sent[0].MessageId, Is.EqualTo(MessageId.Pong));
@@ -1727,7 +1751,7 @@ Append to `ProtocolSessionDispatchTests.cs`, inside the class:
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
 
-            transport.EnqueueInbound(new TransportMessage(MessageId.Ping, Array.Empty<byte>()));
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
 
             Assert.That(faults, Is.Empty);
         }
