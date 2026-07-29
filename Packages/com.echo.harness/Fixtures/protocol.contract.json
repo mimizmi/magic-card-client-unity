@@ -9,45 +9,1213 @@
     "body_encoding": "utf-8-json",
     "max_payload_bytes": 1048576
   },
+  "types": {
+    "CardRef": {
+      "fields": [
+        {
+          "json_name": "zone",
+          "go_type": "string",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "slot",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        }
+      ]
+    },
+    "CardView": {
+      "fields": [
+        {
+          "json_name": "slot",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "suit",
+          "go_type": "string",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "card_type",
+          "go_type": "string",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "points",
+          "go_type": "*int",
+          "nullable": true,
+          "omitempty": false
+        },
+        {
+          "json_name": "raw_points",
+          "go_type": "*int",
+          "nullable": true,
+          "omitempty": true
+        }
+      ]
+    },
+    "OpponentView": {
+      "fields": [
+        {
+          "json_name": "seat",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "max_hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "shield_hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "energy",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "max_energy",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "character",
+          "go_type": "string",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "is_near_death",
+          "go_type": "bool",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "hand_count",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "synth_count",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "public_extra",
+          "go_type": "map[string]any",
+          "nullable": true,
+          "omitempty": true
+        }
+      ]
+    },
+    "PendingAttackView": {
+      "fields": [
+        {
+          "json_name": "attacker_seat",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "attack_points",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        }
+      ]
+    },
+    "PlayerView": {
+      "fields": [
+        {
+          "json_name": "seat",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "max_hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "shield_hp",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "energy",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "max_energy",
+          "go_type": "int",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "character",
+          "go_type": "string",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "is_near_death",
+          "go_type": "bool",
+          "nullable": false,
+          "omitempty": false
+        },
+        {
+          "json_name": "hand",
+          "go_type": "[]CardView",
+          "type_ref": "CardView",
+          "repeated": true,
+          "nullable": true,
+          "omitempty": false
+        },
+        {
+          "json_name": "synth_zone",
+          "go_type": "[]CardView",
+          "type_ref": "CardView",
+          "repeated": true,
+          "nullable": true,
+          "omitempty": false
+        },
+        {
+          "json_name": "extra_info",
+          "go_type": "map[string]any",
+          "nullable": true,
+          "omitempty": true
+        }
+      ]
+    }
+  },
   "messages": [
-    { "id": 1, "name": "Ping", "direction": "server_to_client", "kind": "system" },
-    { "id": 2, "name": "Pong", "direction": "client_to_server", "kind": "system" },
-    { "id": 3, "name": "ClientPingRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4, "name": "ClientPingResponse", "direction": "server_to_client", "kind": "response" },
-    { "id": 1001, "name": "LoginRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 1002, "name": "LoginResponse", "direction": "server_to_client", "kind": "response" },
-    { "id": 2001, "name": "JoinQueueRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 2002, "name": "JoinQueueResponse", "direction": "server_to_client", "kind": "response" },
-    { "id": 2003, "name": "LeaveQueueRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 2004, "name": "MatchFoundEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 2005, "name": "SelectCharacterRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 2006, "name": "GameStartEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 2007, "name": "CreateAiGameRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 3001, "name": "GameStateEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 3002, "name": "PhaseChangeEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 4001, "name": "PlayCardRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4002, "name": "MoveToSynthesisRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4003, "name": "SynthesizeRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4004, "name": "UseSkillRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4005, "name": "TriggerLiberationRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4006, "name": "EndActionRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4007, "name": "DefenseRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4008, "name": "GameConfigRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4009, "name": "SurrenderRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4010, "name": "ReviveRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 4011, "name": "RokkaActivateRequest", "direction": "client_to_server", "kind": "request" },
-    { "id": 5001, "name": "DamageEvent", "direction": "server_to_client", "kind": "event", "payload_fields": ["attacker_seat", "defender_seat", "raw_damage", "final_damage", "hp_after", "detail"] },
-    { "id": 5002, "name": "SkillUsedEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5003, "name": "LiberationEvent", "direction": "server_to_client", "kind": "event", "payload_fields": ["player_seat", "character", "desc"] },
-    { "id": 5004, "name": "FieldEffectEvent", "direction": "server_to_client", "kind": "event", "payload_fields": ["effect_id", "effect_name", "desc"] },
-    { "id": 5005, "name": "PlayerStatusEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5006, "name": "GameOverEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5007, "name": "ErrorEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5008, "name": "BlessingEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5009, "name": "IncomingAttackEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5010, "name": "TurnTimerEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5011, "name": "GameConfigEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5012, "name": "CardPlayedEvent", "direction": "server_to_client", "kind": "event" },
-    { "id": 5013, "name": "DeathDialogEvent", "direction": "server_to_client", "kind": "event" }
+    {
+      "id": 1,
+      "name": "Ping",
+      "direction": "server_to_client",
+      "kind": "system",
+      "payload": {
+        "shape": "none"
+      }
+    },
+    {
+      "id": 2,
+      "name": "Pong",
+      "direction": "client_to_server",
+      "kind": "system",
+      "payload": {
+        "shape": "none"
+      }
+    },
+    {
+      "id": 3,
+      "name": "ClientPingRequest",
+      "go_type": "ClientPingReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "ts",
+            "go_type": "int64",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "name": "ClientPingResponse",
+      "go_type": "ClientPingResp",
+      "direction": "server_to_client",
+      "kind": "response",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "ts",
+            "go_type": "int64",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 1001,
+      "name": "LoginRequest",
+      "go_type": "LoginReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_name",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "reconnect_token",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 1002,
+      "name": "LoginResponse",
+      "go_type": "LoginResp",
+      "direction": "server_to_client",
+      "kind": "response",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "success",
+            "go_type": "bool",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "player_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          },
+          {
+            "json_name": "reconnect_token",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          },
+          {
+            "json_name": "in_game",
+            "go_type": "bool",
+            "nullable": false,
+            "omitempty": true
+          },
+          {
+            "json_name": "config_hash",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          },
+          {
+            "json_name": "error",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 2001,
+      "name": "JoinQueueRequest",
+      "go_type": "JoinQueueReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 2002,
+      "name": "JoinQueueResponse",
+      "go_type": "JoinQueueResp",
+      "direction": "server_to_client",
+      "kind": "response",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "success",
+            "go_type": "bool",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "error",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 2003,
+      "name": "LeaveQueueRequest",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "none"
+      }
+    },
+    {
+      "id": 2004,
+      "name": "MatchFoundEvent",
+      "go_type": "MatchFoundEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "game_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "your_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "opponent_name",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 2005,
+      "name": "SelectCharacterRequest",
+      "go_type": "SelectCharacterReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "character_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 2006,
+      "name": "GameStartEvent",
+      "go_type": "GameStartEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "game_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "seat0_char",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "seat1_char",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 2007,
+      "name": "CreateAiGameRequest",
+      "go_type": "CreateAIGameReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_char_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "ai_char_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 3001,
+      "name": "GameStateEvent",
+      "go_type": "GameStateView",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "round",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "phase",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "active_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "field_effect",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "pending_attack",
+            "go_type": "*PendingAttackView",
+            "type_ref": "PendingAttackView",
+            "nullable": true,
+            "omitempty": true
+          },
+          {
+            "json_name": "me",
+            "go_type": "PlayerView",
+            "type_ref": "PlayerView",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "opponent",
+            "go_type": "OpponentView",
+            "type_ref": "OpponentView",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 3002,
+      "name": "PhaseChangeEvent",
+      "go_type": "PhaseChangeEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "round",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "phase",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "active_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "field_effect",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4001,
+      "name": "PlayCardRequest",
+      "go_type": "PlayCardReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "zone",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "slot",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4002,
+      "name": "MoveToSynthesisRequest",
+      "go_type": "MoveToSynthReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "hand_slot",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "target_slot",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 4003,
+      "name": "SynthesizeRequest",
+      "go_type": "SynthesizeReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "slot1",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "zone1",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "slot2",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "zone2",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4004,
+      "name": "UseSkillRequest",
+      "go_type": "UseSkillReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "skill_card_slot",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4005,
+      "name": "TriggerLiberationRequest",
+      "go_type": "TriggerLibrateReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "empty"
+      }
+    },
+    {
+      "id": 4006,
+      "name": "EndActionRequest",
+      "go_type": "EndActionReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "empty"
+      }
+    },
+    {
+      "id": 4007,
+      "name": "DefenseRequest",
+      "go_type": "DefenseReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "pass",
+            "go_type": "bool",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "zone",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": true
+          },
+          {
+            "json_name": "slot",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 4008,
+      "name": "GameConfigRequest",
+      "go_type": "GameConfigReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "empty"
+      }
+    },
+    {
+      "id": 4009,
+      "name": "SurrenderRequest",
+      "go_type": "SurrenderReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "empty"
+      }
+    },
+    {
+      "id": 4010,
+      "name": "ReviveRequest",
+      "go_type": "ReviveReq",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "card1",
+            "go_type": "CardRef",
+            "type_ref": "CardRef",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "card2",
+            "go_type": "CardRef",
+            "type_ref": "CardRef",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 4011,
+      "name": "RokkaActivateRequest",
+      "direction": "client_to_server",
+      "kind": "request",
+      "payload": {
+        "shape": "none"
+      }
+    },
+    {
+      "id": 5001,
+      "name": "DamageEvent",
+      "go_type": "DamageEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "attacker_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "defender_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "raw_damage",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "final_damage",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "hp_after",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "detail",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5002,
+      "name": "SkillUsedEvent",
+      "go_type": "SkillUsedEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "character",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "skill_level",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "desc",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5003,
+      "name": "LiberationEvent",
+      "go_type": "LiberationEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "character",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "desc",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5004,
+      "name": "FieldEffectEvent",
+      "go_type": "FieldEffectEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "effect_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "effect_name",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "desc",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5005,
+      "name": "PlayerStatusEvent",
+      "go_type": "PlayerStatusEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "hp",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "max_hp",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "shield_hp",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "energy",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "max_energy",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5006,
+      "name": "GameOverEvent",
+      "go_type": "GameOverEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "winner_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "reason",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5007,
+      "name": "ErrorEvent",
+      "go_type": "ErrorEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "code",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "message",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5008,
+      "name": "BlessingEvent",
+      "go_type": "BlessingEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "second_char_id",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "second_char_name",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5009,
+      "name": "IncomingAttackEvent",
+      "go_type": "IncomingAttackEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "attacker_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "attack_points",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5010,
+      "name": "TurnTimerEvent",
+      "go_type": "TurnTimerEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "active_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "seconds_left",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5011,
+      "name": "GameConfigEvent",
+      "go_type": "GameConfigEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "characters",
+            "go_type": "[]map[string]any",
+            "repeated": true,
+            "nullable": true,
+            "omitempty": false
+          },
+          {
+            "json_name": "fields",
+            "go_type": "[]map[string]any",
+            "repeated": true,
+            "nullable": true,
+            "omitempty": false
+          },
+          {
+            "json_name": "config_hash",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5012,
+      "name": "CardPlayedEvent",
+      "go_type": "CardPlayedEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "player_seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "card_type",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "suit",
+            "go_type": "string",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "points",
+            "go_type": "*int",
+            "nullable": true,
+            "omitempty": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 5013,
+      "name": "DeathDialogEvent",
+      "go_type": "DeathDialogEv",
+      "direction": "server_to_client",
+      "kind": "event",
+      "payload": {
+        "shape": "struct",
+        "fields": [
+          {
+            "json_name": "seat",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "deadline_ms",
+            "go_type": "int64",
+            "nullable": false,
+            "omitempty": false
+          },
+          {
+            "json_name": "duration_sec",
+            "go_type": "int",
+            "nullable": false,
+            "omitempty": false
+          }
+        ]
+      }
+    }
   ]
 }
