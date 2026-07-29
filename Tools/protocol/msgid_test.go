@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseMessageConstsReadsIdDirectionAndKind(t *testing.T) {
 	consts, err := ParseMessageConsts("testdata")
@@ -26,8 +29,12 @@ func TestParseMessageConstsReadsIdDirectionAndKind(t *testing.T) {
 }
 
 func TestParseMessageConstsRejectsAMissingDirectionArrow(t *testing.T) {
-	if _, err := ParseMessageConsts("testdata/nodirection"); err == nil {
+	_, err := ParseMessageConsts("testdata/nodirection")
+	if err == nil {
 		t.Fatal("expected an error for a constant with no direction arrow")
+	}
+	if !strings.Contains(err.Error(), "MsgMysteryEv") {
+		t.Errorf("error = %q, want it to name MsgMysteryEv", err.Error())
 	}
 }
 
@@ -48,7 +55,11 @@ func TestParseMessageConstsParsesHexIntegerLiteral(t *testing.T) {
 }
 
 func TestParseMessageConstsRejectsGroupedMessageConstants(t *testing.T) {
-	if _, err := ParseMessageConsts("testdata/grouped"); err == nil {
+	_, err := ParseMessageConsts("testdata/grouped")
+	if err == nil {
 		t.Fatal("expected an error for a grouped Msg constant declaration")
+	}
+	if !strings.Contains(err.Error(), "MsgGroupedA") || !strings.Contains(err.Error(), "MsgGroupedB") {
+		t.Errorf("error = %q, want it to name MsgGroupedA and MsgGroupedB", err.Error())
 	}
 }
