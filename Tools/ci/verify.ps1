@@ -16,7 +16,9 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
 & (Join-Path $PSScriptRoot 'restore-nuget.ps1') `
     -ProjectRoot $ProjectRoot `
     -CheckOnly
-& (Join-Path $PSScriptRoot 'verify-architecture.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $PSScriptRoot 'verify-architecture.ps1') `
+    -ProjectRoot $ProjectRoot `
+    -GoServerRoot $GoServerRoot
 & (Join-Path $PSScriptRoot 'run-unity-tests.ps1') `
     -ProjectRoot $ProjectRoot `
     -UnityEditorPath $UnityEditorPath
