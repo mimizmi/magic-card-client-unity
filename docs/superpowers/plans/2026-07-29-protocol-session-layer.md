@@ -1718,11 +1718,16 @@ queueing: with no correlation id it could be handed the first one's reply."
 
 **Files:**
 - Modify: `Packages/com.echo.harness/Runtime/Application/Session/ProtocolSession.cs`
+- Modify: `Packages/com.echo.harness/TestKit/DeterministicFakes.cs` (add `FailNextSend`)
 - Test: `Packages/com.echo.harness/Tests/EditMode/ProtocolSessionDispatchTests.cs` (append)
 
 **Interfaces:**
-- Consumes: `SendAsync` (Task 5), `Dispatch` (Tasks 4-6).
-- Produces: no new public member; the pump answers `MessageId.Ping` with `MessageId.Pong` before any other routing.
+- Consumes: `SendAsync` (Task 5), `Dispatch` (Tasks 4-6), `PublishFault` (Task 4).
+- Produces: no new public member on the session; the pump answers `MessageId.Ping`
+  with `MessageId.Pong` before any other routing, via a private
+  `ReplyToHeartbeatAsync()`. Adds `FakeTransport.FailNextSend(Exception)`.
+
+The test file needs `using System.IO;` for `IOException`; add it if absent.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1755,7 +1760,57 @@ Append to `ProtocolSessionDispatchTests.cs`, inside the class:
 
             Assert.That(faults, Is.Empty);
         }
+
+        [Test]
+        public void Heartbeat_SurvivesASendFailureWithoutKillingThePump()
+        {
+            // Both of the previous two tests pass even with a bare
+            // SendAsync(...).Forget(), because FakeTransport's send succeeds
+            // synchronously. This is the test that actually covers the hazard.
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            transport.FailNextSend(new IOException("socket closed"));
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                "A failed heartbeat reply must not kill the pump.");
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.TransportFailure));
+
+            // The pump must still be processing after the failed reply.
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+        }
 ```
+
+This test needs a new hook on the fake. Add to `FakeTransport`, beside `FailNextReceive`:
+
+```csharp
+        private Exception nextSendFailure;
+
+        /// <summary>Makes the next send fail, standing in for a closed socket.</summary>
+        public void FailNextSend(Exception failure)
+        {
+            nextSendFailure = failure ?? throw new ArgumentNullException(nameof(failure));
+        }
+```
+
+and at the top of `SendAsync`, after `EnsureConnected()`:
+
+```csharp
+            if (nextSendFailure != null)
+            {
+                var failure = nextSendFailure;
+                nextSendFailure = null;
+                throw failure;
+            }
+```
+
+It throws synchronously on purpose: that is the shape a real transport takes when it
+validates eagerly, and it is the shape a bare `.Forget()` cannot survive.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1772,9 +1827,38 @@ In `ProtocolSession.cs`, insert this branch in `Dispatch` immediately after the 
                 // Answered here rather than by a subscriber: missing one Pong makes
                 // the server treat the connection as dead, which is too important to
                 // depend on someone remembering to subscribe.
-                SendAsync(MessageId.Pong, null, CancellationToken.None).Forget();
+                ReplyToHeartbeatAsync().Forget();
                 return;
             }
+```
+
+And add this private method beside `Dispatch`:
+
+```csharp
+        /// <summary>
+        /// A bare SendAsync(...).Forget() here would be wrong twice over. Dispatch
+        /// runs outside the pump's try, and SendAsync is not async - it validates
+        /// and returns transport.SendAsync(...) directly - so an eagerly validating
+        /// transport throws on the pump's stack before any task exists and Forget()
+        /// never runs, killing the pump on an open connection. And a task that
+        /// faults later would be routed to the unobserved-exception handler, which
+        /// keeps the pump alive but loses the Pong silently, and one lost Pong is
+        /// what makes the server declare the connection dead.
+        /// </summary>
+        private async UniTaskVoid ReplyToHeartbeatAsync()
+        {
+            try
+            {
+                await SendAsync(MessageId.Pong, null, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                PublishFault(new SessionFault(
+                    SessionFaultKind.TransportFailure,
+                    MessageId.Pong,
+                    $"Failed to answer a heartbeat: {exception.Message}"));
+            }
+        }
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
