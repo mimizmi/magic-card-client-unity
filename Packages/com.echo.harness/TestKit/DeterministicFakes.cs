@@ -13,6 +13,7 @@ namespace Echo.Harness.TestKit
         private UniTaskCompletionSource<TransportMessage> pendingReceive;
         private CancellationTokenRegistration pendingReceiveCancellation;
         private Exception nextReceiveFailure;
+        private Exception nextSendFailure;
 
         public TransportState State { get; private set; } = TransportState.Disconnected;
 
@@ -51,6 +52,12 @@ namespace Echo.Harness.TestKit
             nextReceiveFailure = failure;
         }
 
+        /// <summary>Makes the next send fail, standing in for a closed socket.</summary>
+        public void FailNextSend(Exception failure)
+        {
+            nextSendFailure = failure ?? throw new ArgumentNullException(nameof(failure));
+        }
+
         public UniTask ConnectAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -64,6 +71,17 @@ namespace Echo.Harness.TestKit
         {
             cancellationToken.ThrowIfCancellationRequested();
             EnsureConnected();
+
+            // Synchronously, on purpose: that is the shape a real transport takes
+            // when it validates eagerly, and it is the shape a bare .Forget()
+            // cannot survive.
+            if (nextSendFailure != null)
+            {
+                var failure = nextSendFailure;
+                nextSendFailure = null;
+                throw failure;
+            }
+
             sent.Add(message);
             return UniTask.CompletedTask;
         }

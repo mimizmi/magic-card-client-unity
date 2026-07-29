@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
@@ -241,6 +242,66 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.Throws<InvalidOperationException>(
                 () => session.SendAsync(MessageId.Pong, null, default).GetAwaiter().GetResult());
+        }
+
+        [Test]
+        public void Heartbeat_AnswersAnInboundPingWithPong()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0].MessageId, Is.EqualTo(MessageId.Pong));
+            Assert.That(transport.Sent[0].Payload, Is.Empty,
+                "The Go server sends heartbeats with a nil body; the reply matches.");
+        }
+
+        [Test]
+        public void Heartbeat_DoesNotSurfaceToFaultHandlers()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(faults, Is.Empty);
+        }
+
+        [Test]
+        public void Heartbeat_SurvivesASendFailureWithoutKillingThePump()
+        {
+            // Both of the previous two tests pass even with a bare
+            // SendAsync(...).Forget(), because FakeTransport's send succeeds
+            // synchronously. This is the test that actually covers the hazard.
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            transport.FailNextSend(new IOException("socket closed"));
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                "A failed heartbeat reply must not kill the pump.");
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.TransportFailure));
+
+            // The pump must still be processing after the failed reply, and that is
+            // observed by delivery rather than by State. A pump killed through
+            // Dispatch unwinds into the unobserved-exception handler without ever
+            // touching State, so State still reads Connected for a dead pump and
+            // cannot tell the two apart. Only a later message actually arriving can.
+            var delivered = false;
+            session.Subscribe<GameOverEventDto>(MessageId.GameOverEvent, _ => delivered = true);
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+
+            Assert.That(delivered, Is.True,
+                "The pump must still be delivering messages after a failed heartbeat reply.");
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
         }
     }
 }

@@ -313,6 +313,15 @@ namespace Echo.Harness.Application
                 return;
             }
 
+            if (result.MessageId == MessageId.Ping)
+            {
+                // Answered here rather than by a subscriber: missing one Pong makes
+                // the server treat the connection as dead, which is too important to
+                // depend on someone remembering to subscribe.
+                ReplyToHeartbeatAsync().Forget();
+                return;
+            }
+
             if (pendingRequests.TryGetValue(result.MessageId, out var completion))
             {
                 // No removal here: the entry has exactly one owner, the
@@ -339,6 +348,31 @@ namespace Echo.Harness.Application
             }
 
             DeliverToSubscribers(result);
+        }
+
+        /// <summary>
+        /// A bare SendAsync(...).Forget() here would be wrong twice over. Dispatch
+        /// runs outside the pump's try, and SendAsync is not async - it validates
+        /// and returns transport.SendAsync(...) directly - so an eagerly validating
+        /// transport throws on the pump's stack before any task exists and Forget()
+        /// never runs, killing the pump on an open connection. And a task that
+        /// faults later would be routed to the unobserved-exception handler, which
+        /// keeps the pump alive but loses the Pong silently, and one lost Pong is
+        /// what makes the server declare the connection dead.
+        /// </summary>
+        private async UniTaskVoid ReplyToHeartbeatAsync()
+        {
+            try
+            {
+                await SendAsync(MessageId.Pong, null, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                PublishFault(new SessionFault(
+                    SessionFaultKind.TransportFailure,
+                    MessageId.Pong,
+                    $"Failed to answer a heartbeat: {exception.Message}"));
+            }
         }
 
         /// <summary>
