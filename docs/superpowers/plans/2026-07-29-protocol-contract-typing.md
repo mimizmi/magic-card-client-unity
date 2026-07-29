@@ -140,6 +140,13 @@ The fixture's `frame` block is a hard-coded constant in the extractor. The real 
 - Consumes: nothing.
 - Produces: `type MessageConst struct { ID uint16; GoConst string; Direction string; Kind string }` and `func ParseMessageConsts(sourceDir string) ([]MessageConst, error)`. Returns entries sorted by ascending `ID`. `Direction` is `"client_to_server"` or `"server_to_client"`. `Kind` is `"system"`, `"request"`, `"response"`, or `"event"`.
 
+> **Amendment (applied, commits `a60c284` and `3d38b3d`).** Review found two defects in the Step 5 code below, and the human partner ruled the review governs. The committed implementation therefore differs from the code block in this task; `Tools/protocol/msgid.go` is the source of truth. The two changes:
+>
+> 1. `strconv.ParseUint(literal.Value, 10, 16)` uses base **`0`**, not `10`. Base 10 rejects `0x3E9`, `0o1751`, `0b…`, and `1_001` — all legal `token.INT` literals — and would report them as "not an integer literal".
+> 2. The single combined guard `if !ok || len(value.Names) != 1 || len(value.Values) != 1 { continue }` silently dropped `Msg`-prefixed constants declared as `MsgA, MsgB uint16 = 1, 2` or via implicit iota continuation. That contradicts this task's own stated principle that contract information the compiler does not enforce must error rather than default silently. It is now three ordered guards: a non-`ValueSpec` skips silently; a spec with no `Msg`-prefixed name skips silently (unrelated constants must not start erroring); a spec with any `Msg`-prefixed name but not exactly one name and one value returns an error naming the offending constants, via new `anyMsgPrefixed` and `identNames` helpers.
+>
+> Both error-path tests were also strengthened to assert the message names the offending constant, and `testdata/grouped/msgid.go` carries an unrelated valid constant so the grouped test discriminates — without it the pre-fix code errored anyway via the "no Msg* constants found" path, making the test tautological. A mutation check confirms the test fails against the pre-fix guard.
+
 - [ ] **Step 1: Create the module file**
 
 `Tools/protocol/go.mod`:
