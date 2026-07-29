@@ -132,5 +132,41 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(result.Diagnostic, Does.Contain("null"));
             Assert.That(result.Diagnostic, Does.Not.Contain("empty"));
         }
+
+        [Test]
+        public void ResponseFor_PairsEveryRequestThatHasAResponse()
+        {
+            Assert.That(
+                ProtocolMessageMap.ResponseFor[MessageId.ClientPingRequest],
+                Is.EqualTo(MessageId.ClientPingResponse));
+            Assert.That(
+                ProtocolMessageMap.ResponseFor[MessageId.LoginRequest],
+                Is.EqualTo(MessageId.LoginResponse));
+            Assert.That(
+                ProtocolMessageMap.ResponseFor[MessageId.JoinQueueRequest],
+                Is.EqualTo(MessageId.JoinQueueResponse));
+        }
+
+        [Test]
+        public void ResponseFor_CoversEveryFixtureMessageOfKindResponse()
+        {
+            // Driven from the generated fixture so a server-side addition cannot
+            // leave the hand-maintained table silently incomplete.
+            var fixture = ProtocolContractFixture.Load();
+            var responseIds = new System.Collections.Generic.List<MessageId>();
+            foreach (var message in fixture.Messages)
+            {
+                if (message.Kind == "response")
+                {
+                    responseIds.Add((MessageId)message.Id);
+                }
+            }
+
+            Assert.That(responseIds, Is.Not.Empty);
+            Assert.That(
+                ProtocolMessageMap.ResponseFor.Values,
+                Is.EquivalentTo(responseIds),
+                "Every fixture response must be paired exactly once in ResponseFor.");
+        }
     }
 }

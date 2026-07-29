@@ -73,5 +73,21 @@ namespace Echo.Harness.Contracts
                 { "PlayerView", typeof(PlayerViewDto) },
                 { "OpponentView", typeof(OpponentViewDto) },
             };
+
+        /// <summary>
+        /// Maps a request to the response the server answers it with.
+        ///
+        /// The protocol carries no correlation identifier, so waiting for the
+        /// next message of the paired id is the only correlation available.
+        /// Keeping the three pairs in one table makes that assumption auditable
+        /// rather than scattered through call sites.
+        /// </summary>
+        public static IReadOnlyDictionary<MessageId, MessageId> ResponseFor { get; } =
+            new Dictionary<MessageId, MessageId>
+            {
+                { MessageId.ClientPingRequest, MessageId.ClientPingResponse },
+                { MessageId.LoginRequest, MessageId.LoginResponse },
+                { MessageId.JoinQueueRequest, MessageId.JoinQueueResponse },
+            };
     }
 }
