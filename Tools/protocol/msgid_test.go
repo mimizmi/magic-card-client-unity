@@ -30,3 +30,25 @@ func TestParseMessageConstsRejectsAMissingDirectionArrow(t *testing.T) {
 		t.Fatal("expected an error for a constant with no direction arrow")
 	}
 }
+
+func TestParseMessageConstsParsesHexIntegerLiteral(t *testing.T) {
+	consts, err := ParseMessageConsts("testdata/hexid")
+	if err != nil {
+		t.Fatalf("ParseMessageConsts: %v", err)
+	}
+	want := []MessageConst{
+		{ID: 1001, GoConst: "MsgHexId", Direction: "server_to_client", Kind: "system"},
+	}
+	if len(consts) != len(want) {
+		t.Fatalf("len = %d, want %d", len(consts), len(want))
+	}
+	if consts[0] != want[0] {
+		t.Errorf("consts[0] = %+v, want %+v", consts[0], want[0])
+	}
+}
+
+func TestParseMessageConstsRejectsGroupedMessageConstants(t *testing.T) {
+	if _, err := ParseMessageConsts("testdata/grouped"); err == nil {
+		t.Fatal("expected an error for a grouped Msg constant declaration")
+	}
+}

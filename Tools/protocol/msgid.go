@@ -37,18 +37,21 @@ func ParseMessageConsts(sourceDir string) ([]MessageConst, error) {
 		}
 		for _, spec := range group.Specs {
 			value, ok := spec.(*ast.ValueSpec)
-			if !ok || len(value.Names) != 1 || len(value.Values) != 1 {
+			if !ok {
 				continue
+			}
+			if !anyMsgPrefixed(value.Names) {
+				continue
+			}
+			if len(value.Names) != 1 || len(value.Values) != 1 {
+				return nil, fmt.Errorf("%s: grouped or implicit-value message constants are not supported", identNames(value.Names))
 			}
 			name := value.Names[0].Name
-			if !strings.HasPrefix(name, "Msg") {
-				continue
-			}
 			literal, ok := value.Values[0].(*ast.BasicLit)
 			if !ok || literal.Kind != token.INT {
 				return nil, fmt.Errorf("%s: message id is not an integer literal", name)
 			}
-			id, err := strconv.ParseUint(literal.Value, 10, 16)
+			id, err := strconv.ParseUint(literal.Value, 0, 16)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", name, err)
 			}
@@ -70,6 +73,29 @@ func ParseMessageConsts(sourceDir string) ([]MessageConst, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+// anyMsgPrefixed reports whether any of names starts with "Msg". A ValueSpec
+// with no Msg-prefixed name at all is unrelated to the message-id block (for
+// example, a sibling const group in the same file) and must stay silently
+// skipped rather than be treated as a validation failure.
+func anyMsgPrefixed(names []*ast.Ident) bool {
+	for _, n := range names {
+		if strings.HasPrefix(n.Name, "Msg") {
+			return true
+		}
+	}
+	return false
+}
+
+// identNames renders a comma-separated list of identifier names, used to name
+// the offending constant(s) in a grouped or implicit-value error.
+func identNames(names []*ast.Ident) string {
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = n.Name
+	}
+	return strings.Join(parts, ", ")
 }
 
 // parseDirection reads the S→C / C→S arrow from a constant's line comment.
