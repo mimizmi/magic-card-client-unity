@@ -49,6 +49,33 @@ namespace Echo.Harness.Tests.EditMode
                 () => session.Subscribe<LoginResponseDto>(MessageId.DamageEvent, _ => { }));
         }
 
+        /// <summary>
+        /// These four ids carry no body at all, so ProtocolCodec.Decode reports
+        /// success with a null payload. Rejecting them at subscription time is
+        /// the only thing standing between that null and a typed cast in
+        /// DeliverToSubscribers, which is why the assertion below pins the
+        /// message: an implementation that happened to throw from the
+        /// type-comparison branch instead would satisfy a bare Throws and leave
+        /// the guarantee resting on an accident.
+        /// </summary>
+        [TestCase(MessageId.Ping)]
+        [TestCase(MessageId.Pong)]
+        [TestCase(MessageId.LeaveQueueRequest)]
+        [TestCase(MessageId.RokkaActivateRequest)]
+        public void Subscribe_RejectsAMessageThatCarriesNoPayload(MessageId messageId)
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.Subscribe<GameOverEventDto>(messageId, _ => { }));
+
+            Assert.That(
+                exception.Message,
+                Does.Contain("carries no payload and cannot be subscribed to"),
+                "The no-payload guard must be what rejected this, not the type comparison.");
+        }
+
         [Test]
         public void Subscribe_StopsDeliveringAfterDisposal()
         {
@@ -156,6 +183,42 @@ namespace Echo.Harness.Tests.EditMode
                     MessageId.PlayCardRequest,
                     new LoginRequestDto(),
                     default).GetAwaiter().GetResult());
+        }
+
+        /// <summary>
+        /// The other half of the constraint that
+        /// SendAsync_AcceptsANullPayloadForAMessageThatCarriesNone covers. Without
+        /// this branch a forgotten payload ships as an empty frame and the server
+        /// sees a login with no name rather than a client-side error.
+        /// </summary>
+        [Test]
+        public void SendAsync_RejectsANullPayloadForAMessageThatRequiresOne()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.SendAsync(
+                    MessageId.LoginRequest, null, default).GetAwaiter().GetResult());
+
+            Assert.That(exception.Message, Does.Contain("requires a LoginRequestDto payload"));
+            Assert.That(transport.Sent, Is.Empty, "A rejected send must never reach the wire.");
+        }
+
+        [Test]
+        public void SendAsync_RejectsAPayloadForAMessageThatCarriesNone()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.SendAsync(
+                    MessageId.Pong,
+                    new LoginRequestDto(),
+                    default).GetAwaiter().GetResult());
+
+            Assert.That(exception.Message, Does.Contain("Pong carries no payload"));
+            Assert.That(transport.Sent, Is.Empty, "A rejected send must never reach the wire.");
         }
 
         [Test]
