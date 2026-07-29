@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func parseTestStructs(t *testing.T) map[string]Struct {
 	t.Helper()
@@ -86,5 +89,75 @@ func TestParseStructsDescribesSlicesMapsAndNamedRefs(t *testing.T) {
 	card1 := structs["ReviveReq"].Fields[0]
 	if card1.GoType != "CardRef" || card1.TypeRef != "CardRef" || card1.Nullable {
 		t.Errorf("card1 = %+v, want a non-nullable CardRef reference", card1)
+	}
+}
+
+func TestParseStructsDescribesPointerToNamedStruct(t *testing.T) {
+	// *PendingAttackView is the shape the real GameStateView actually uses.
+	pending := parseTestStructs(t)["NestedShapes"].Fields[0]
+
+	if pending.JSONName != "pending_attack" {
+		t.Fatalf("field 0 = %q, want pending_attack", pending.JSONName)
+	}
+	if pending.GoType != "*PendingAttackView" {
+		t.Errorf("GoType = %q, want *PendingAttackView", pending.GoType)
+	}
+	if pending.TypeRef != "PendingAttackView" {
+		t.Errorf("TypeRef = %q, want PendingAttackView", pending.TypeRef)
+	}
+	if !pending.Nullable || pending.Repeated || !pending.OmitEmpty {
+		t.Errorf("pending_attack = %+v, want nullable, not repeated, omitempty", pending)
+	}
+}
+
+func TestParseStructsKeepsRepeatedThroughPointerAndSliceNesting(t *testing.T) {
+	fields := parseTestStructs(t)["NestedShapes"].Fields
+
+	pointerToSlice := fields[1]
+	if pointerToSlice.JSONName != "pointer_to_hand" {
+		t.Fatalf("field 1 = %q, want pointer_to_hand", pointerToSlice.JSONName)
+	}
+	if pointerToSlice.GoType != "*[]CardView" {
+		t.Errorf("GoType = %q, want *[]CardView", pointerToSlice.GoType)
+	}
+	if !pointerToSlice.Repeated {
+		t.Error("*[]CardView is still a JSON array; Repeated must survive the pointer")
+	}
+	if !pointerToSlice.Nullable || pointerToSlice.TypeRef != "CardView" {
+		t.Errorf("pointer_to_hand = %+v, want nullable with TypeRef CardView", pointerToSlice)
+	}
+
+	sliceOfPointer := fields[2]
+	if sliceOfPointer.GoType != "[]*CardView" {
+		t.Errorf("GoType = %q, want []*CardView", sliceOfPointer.GoType)
+	}
+	if !sliceOfPointer.Repeated || !sliceOfPointer.Nullable {
+		t.Errorf("slice_of_pointer = %+v, want repeated and nullable", sliceOfPointer)
+	}
+	if sliceOfPointer.TypeRef != "CardView" {
+		t.Errorf("TypeRef = %q, want CardView", sliceOfPointer.TypeRef)
+	}
+}
+
+func TestParseStructsSkipsUnexportedFields(t *testing.T) {
+	fields := parseTestStructs(t)["NestedShapes"].Fields
+
+	if len(fields) != 3 {
+		t.Fatalf("field count = %d, want 3; encoding/json never serializes unexported fields", len(fields))
+	}
+	for _, field := range fields {
+		if field.JSONName == "unexported" {
+			t.Error("an unexported field must not reach the contract, tag or no tag")
+		}
+	}
+}
+
+func TestParseStructsRejectsUnsupportedFieldTypes(t *testing.T) {
+	_, err := ParseStructs("testdata/unsupported", "messages.go")
+	if err == nil {
+		t.Fatal("expected an error for a field type that cannot be a JSON contract")
+	}
+	if !strings.Contains(err.Error(), "BadField") || !strings.Contains(err.Error(), "Events") {
+		t.Errorf("error = %q, want it to name BadField and Events", err.Error())
 	}
 }

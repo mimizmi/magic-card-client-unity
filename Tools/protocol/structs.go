@@ -75,6 +75,11 @@ func parseStruct(name string, node *ast.StructType) (Struct, error) {
 		if len(astField.Names) != 1 {
 			return Struct{}, fmt.Errorf("%s: embedded or grouped fields are not supported", name)
 		}
+		// encoding/json never serializes unexported fields, tag or no tag, so
+		// they are not part of the wire contract.
+		if !astField.Names[0].IsExported() {
+			continue
+		}
 		jsonName, omitEmpty, skip := parseJSONTag(astField)
 		if skip {
 			continue
@@ -82,7 +87,10 @@ func parseStruct(name string, node *ast.StructType) (Struct, error) {
 		if jsonName == "" {
 			jsonName = astField.Names[0].Name
 		}
-		goType, typeRef, repeated, nullable := describeType(astField.Type)
+		goType, typeRef, repeated, nullable, err := describeType(astField.Type)
+		if err != nil {
+			return Struct{}, fmt.Errorf("%s.%s: %w", name, astField.Names[0].Name, err)
+		}
 		result.Fields = append(result.Fields, Field{
 			JSONName:  jsonName,
 			GoType:    goType,
@@ -119,26 +127,50 @@ func parseJSONTag(field *ast.Field) (name string, omitEmpty bool, skip bool) {
 // describeType renders a field's Go type and reports whether it can marshal to
 // JSON null. typeRef is a candidate named-type reference; the fixture builder
 // clears it when the name is not a parsed struct.
-func describeType(expr ast.Expr) (goType, typeRef string, repeated, nullable bool) {
+//
+// An unhandled type expression is an error rather than a placeholder value. The
+// fixture this feeds is generated once and then byte-compared forever after, so
+// a wrong value would be baked into the baseline and treated as correct from
+// then on. Refusing to describe what we do not understand is the only way the
+// drift gate stays honest.
+func describeType(expr ast.Expr) (goType, typeRef string, repeated, nullable bool, err error) {
 	switch node := expr.(type) {
 	case *ast.Ident:
-		return node.Name, node.Name, false, false
+		return node.Name, node.Name, false, false, nil
 	case *ast.StarExpr:
-		inner, ref, _, _ := describeType(node.X)
-		return "*" + inner, ref, false, true
+		// A *[]T is still a JSON array once dereferenced, so the inner
+		// repeated flag has to survive the pointer.
+		inner, ref, innerRepeated, _, err := describeType(node.X)
+		if err != nil {
+			return "", "", false, false, err
+		}
+		return "*" + inner, ref, innerRepeated, true, nil
 	case *ast.ArrayType:
-		inner, ref, _, _ := describeType(node.Elt)
-		return "[]" + inner, ref, true, true
+		inner, ref, _, _, err := describeType(node.Elt)
+		if err != nil {
+			return "", "", false, false, err
+		}
+		return "[]" + inner, ref, true, true, nil
 	case *ast.MapType:
-		key, _, _, _ := describeType(node.Key)
-		value, _, _, _ := describeType(node.Value)
-		return "map[" + key + "]" + value, "", false, true
+		key, _, _, _, err := describeType(node.Key)
+		if err != nil {
+			return "", "", false, false, err
+		}
+		value, _, _, _, err := describeType(node.Value)
+		if err != nil {
+			return "", "", false, false, err
+		}
+		return "map[" + key + "]" + value, "", false, true, nil
 	case *ast.InterfaceType:
-		return "any", "", false, true
+		return "any", "", false, true, nil
 	case *ast.SelectorExpr:
-		pkg, _, _, _ := describeType(node.X)
-		return pkg + "." + node.Sel.Name, "", false, false
+		pkg, _, _, _, err := describeType(node.X)
+		if err != nil {
+			return "", "", false, false, err
+		}
+		return pkg + "." + node.Sel.Name, "", false, false, nil
 	default:
-		return "unsupported", "", false, false
+		return "", "", false, false, fmt.Errorf(
+			"unsupported field type %T; it cannot be represented in a JSON wire contract", expr)
 	}
 }
