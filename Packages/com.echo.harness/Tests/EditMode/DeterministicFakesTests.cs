@@ -1,5 +1,6 @@
 using System;
 using System.Text;
+using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
@@ -25,6 +26,35 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(transport.State, Is.EqualTo(TransportState.Connected));
             Assert.That(transport.Sent, Has.Count.EqualTo(1));
             Assert.That(received.MessageId, Is.EqualTo(MessageId.Pong));
+        }
+
+        [Test]
+        public void FakeTransport_ReceiveAwaitsAnEmptyQueueInsteadOfThrowing()
+        {
+            var transport = new FakeTransport();
+            transport.ConnectAsync(default).GetAwaiter().GetResult();
+
+            var pending = transport.ReceiveAsync(default).Preserve();
+            Assert.That(pending.Status.IsCompleted(), Is.False);
+
+            transport.EnqueueInbound(
+                new TransportMessage(MessageId.Pong, System.Array.Empty<byte>()));
+
+            Assert.That(pending.Status.IsCompleted(), Is.True);
+            Assert.That(pending.GetAwaiter().GetResult().MessageId, Is.EqualTo(MessageId.Pong));
+        }
+
+        [Test]
+        public void FakeTransport_FailNextReceiveSurfacesTheInjectedException()
+        {
+            var transport = new FakeTransport();
+            transport.ConnectAsync(default).GetAwaiter().GetResult();
+            transport.FailNextReceive(new System.IO.IOException("stream desynchronized"));
+
+            var error = Assert.Throws<System.IO.IOException>(
+                () => transport.ReceiveAsync(default).GetAwaiter().GetResult());
+
+            Assert.That(error.Message, Is.EqualTo("stream desynchronized"));
         }
 
         [Test]

@@ -10,14 +10,48 @@ namespace Echo.Harness.TestKit
     {
         private readonly Queue<TransportMessage> inbound = new Queue<TransportMessage>();
         private readonly List<TransportMessage> sent = new List<TransportMessage>();
+        private UniTaskCompletionSource<TransportMessage> pendingReceive;
+        private Exception nextReceiveFailure;
 
         public TransportState State { get; private set; } = TransportState.Disconnected;
 
         public IReadOnlyList<TransportMessage> Sent => sent;
 
+        /// <summary>
+        /// Queues an inbound message. When a receive is already awaiting, its
+        /// continuation runs synchronously from this call, so a test can assert
+        /// on the effects of the message as soon as this method returns.
+        /// </summary>
         public void EnqueueInbound(TransportMessage message)
         {
+            var waiter = pendingReceive;
+            if (waiter != null)
+            {
+                pendingReceive = null;
+                waiter.TrySetResult(message);
+                return;
+            }
+
             inbound.Enqueue(message);
+        }
+
+        /// <summary>Makes the next receive fail, standing in for a desynchronized stream.</summary>
+        public void FailNextReceive(Exception failure)
+        {
+            if (failure == null)
+            {
+                throw new ArgumentNullException(nameof(failure));
+            }
+
+            var waiter = pendingReceive;
+            if (waiter != null)
+            {
+                pendingReceive = null;
+                waiter.TrySetException(failure);
+                return;
+            }
+
+            nextReceiveFailure = failure;
         }
 
         public UniTask ConnectAsync(CancellationToken cancellationToken)
@@ -41,18 +75,41 @@ namespace Echo.Harness.TestKit
         {
             cancellationToken.ThrowIfCancellationRequested();
             EnsureConnected();
-            if (inbound.Count == 0)
+
+            if (nextReceiveFailure != null)
             {
-                throw new InvalidOperationException("No inbound fixture is queued.");
+                var failure = nextReceiveFailure;
+                nextReceiveFailure = null;
+                return UniTask.FromException<TransportMessage>(failure);
             }
 
-            return UniTask.FromResult(inbound.Dequeue());
+            if (inbound.Count > 0)
+            {
+                return UniTask.FromResult(inbound.Dequeue());
+            }
+
+            if (pendingReceive != null)
+            {
+                throw new InvalidOperationException(
+                    "Only one receive may await this transport at a time.");
+            }
+
+            pendingReceive = new UniTaskCompletionSource<TransportMessage>();
+            return pendingReceive.Task;
         }
 
         public UniTask DisconnectAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             State = TransportState.Disconnected;
+
+            var waiter = pendingReceive;
+            if (waiter != null)
+            {
+                pendingReceive = null;
+                waiter.TrySetCanceled(cancellationToken);
+            }
+
             return UniTask.CompletedTask;
         }
 
