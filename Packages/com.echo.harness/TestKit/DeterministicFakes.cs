@@ -11,6 +11,7 @@ namespace Echo.Harness.TestKit
         private readonly Queue<TransportMessage> inbound = new Queue<TransportMessage>();
         private readonly List<TransportMessage> sent = new List<TransportMessage>();
         private UniTaskCompletionSource<TransportMessage> pendingReceive;
+        private CancellationTokenRegistration pendingReceiveCancellation;
         private Exception nextReceiveFailure;
 
         public TransportState State { get; private set; } = TransportState.Disconnected;
@@ -24,11 +25,9 @@ namespace Echo.Harness.TestKit
         /// </summary>
         public void EnqueueInbound(TransportMessage message)
         {
-            var waiter = pendingReceive;
-            if (waiter != null)
+            if (pendingReceive != null)
             {
-                pendingReceive = null;
-                waiter.TrySetResult(message);
+                TakePendingReceive().TrySetResult(message);
                 return;
             }
 
@@ -43,11 +42,9 @@ namespace Echo.Harness.TestKit
                 throw new ArgumentNullException(nameof(failure));
             }
 
-            var waiter = pendingReceive;
-            if (waiter != null)
+            if (pendingReceive != null)
             {
-                pendingReceive = null;
-                waiter.TrySetException(failure);
+                TakePendingReceive().TrySetException(failure);
                 return;
             }
 
@@ -94,8 +91,34 @@ namespace Echo.Harness.TestKit
                     "Only one receive may await this transport at a time.");
             }
 
-            pendingReceive = new UniTaskCompletionSource<TransportMessage>();
-            return pendingReceive.Task;
+            var waiter = new UniTaskCompletionSource<TransportMessage>();
+            pendingReceive = waiter;
+
+            // Cancelling the token has to unblock the receive on its own. Without
+            // this the fake would be less cancellable than the real transport it
+            // stands in for, so a pump that stops cleanly in a test could still
+            // hang in production.
+            var registration = cancellationToken.Register(
+                () =>
+                {
+                    if (ReferenceEquals(pendingReceive, waiter))
+                    {
+                        TakePendingReceive().TrySetCanceled(cancellationToken);
+                    }
+                });
+
+            if (ReferenceEquals(pendingReceive, waiter))
+            {
+                pendingReceiveCancellation = registration;
+            }
+            else
+            {
+                // The token was cancelled while registering, so the callback
+                // already ran inline and this registration is spent.
+                registration.Dispose();
+            }
+
+            return waiter.Task;
         }
 
         public UniTask DisconnectAsync(CancellationToken cancellationToken)
@@ -103,14 +126,34 @@ namespace Echo.Harness.TestKit
             cancellationToken.ThrowIfCancellationRequested();
             State = TransportState.Disconnected;
 
-            var waiter = pendingReceive;
-            if (waiter != null)
+            if (pendingReceive != null)
             {
-                pendingReceive = null;
-                waiter.TrySetCanceled(cancellationToken);
+                TakePendingReceive().TrySetCanceled(cancellationToken);
             }
 
             return UniTask.CompletedTask;
+        }
+
+        /// <summary>
+        /// Detaches the awaiting receive so the caller can complete it, and
+        /// releases its cancellation registration.
+        /// </summary>
+        private UniTaskCompletionSource<TransportMessage> TakePendingReceive()
+        {
+            var waiter = pendingReceive;
+
+            // Required, not merely tidy: the field must be cleared BEFORE the
+            // returned source is completed. Completing it resumes the awaiting
+            // pump inline, on this very stack, and that pump's next loop calls
+            // ReceiveAsync re-entrantly. Were the field still set, that call
+            // would trip the "only one receive" guard above, and UniTask would
+            // swallow the throw into PublishUnobservedTaskException — the pump
+            // would silently stop with a message that reads like a concurrency
+            // bug rather than the ordering bug it would actually be.
+            pendingReceive = null;
+            pendingReceiveCancellation.Dispose();
+            pendingReceiveCancellation = default;
+            return waiter;
         }
 
         private void EnsureConnected()
