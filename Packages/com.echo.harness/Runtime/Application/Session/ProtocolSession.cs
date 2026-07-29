@@ -15,6 +15,8 @@ namespace Echo.Harness.Application
         private readonly List<Action<SessionFault>> faultHandlers = new List<Action<SessionFault>>();
         private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
             new Dictionary<MessageId, List<Action<object>>>();
+        private readonly Dictionary<MessageId, UniTaskCompletionSource<object>> pendingRequests =
+            new Dictionary<MessageId, UniTaskCompletionSource<object>>();
 
         private CancellationTokenSource pumpCancellation;
         private bool disposed;
@@ -103,12 +105,61 @@ namespace Echo.Harness.Application
                 cancellationToken);
         }
 
-        public UniTask<TResponse> RequestAsync<TResponse>(
+        public async UniTask<TResponse> RequestAsync<TResponse>(
             MessageId requestId,
             object payload,
             TimeSpan timeout,
-            CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+            CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            if (!ProtocolMessageMap.ResponseFor.TryGetValue(requestId, out var responseId))
+            {
+                throw new ArgumentException(
+                    $"{requestId} is one-way; the server answers with an event, not a response.",
+                    nameof(requestId));
+            }
+
+            var expectedType = ProtocolMessageMap.PayloadTypes[responseId];
+            if (expectedType != typeof(TResponse))
+            {
+                throw new ArgumentException(
+                    $"{responseId} carries {expectedType.Name}, not {typeof(TResponse).Name}.",
+                    nameof(TResponse));
+            }
+
+            if (pendingRequests.ContainsKey(responseId))
+            {
+                throw new InvalidOperationException(
+                    $"A request awaiting {responseId} is already in flight. The protocol has " +
+                    "no correlation id, so a second one could be answered with the first reply.");
+            }
+
+            var completion = new UniTaskCompletionSource<object>();
+            pendingRequests[responseId] = completion;
+            try
+            {
+                await SendAsync(requestId, payload, cancellationToken);
+
+                using var timeoutCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCancellation.CancelAfter(timeout);
+                try
+                {
+                    var response = await completion.Task
+                        .AttachExternalCancellation(timeoutCancellation.Token);
+                    return (TResponse)response;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        $"{requestId} received no {responseId} within {timeout}.");
+                }
+            }
+            finally
+            {
+                pendingRequests.Remove(responseId);
+            }
+        }
 
         public UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken) =>
             throw new NotImplementedException();
@@ -169,6 +220,7 @@ namespace Echo.Harness.Application
             CancelPump();
             faultHandlers.Clear();
             subscribers.Clear();
+            pendingRequests.Clear();
             State = SessionState.Disconnected;
         }
 
@@ -206,6 +258,13 @@ namespace Echo.Harness.Application
                         : SessionFaultKind.MalformedPayload,
                     message.MessageId,
                     result.Diagnostic));
+                return;
+            }
+
+            if (pendingRequests.TryGetValue(result.MessageId, out var completion))
+            {
+                pendingRequests.Remove(result.MessageId);
+                completion.TrySetResult(result.Payload);
                 return;
             }
 
@@ -250,6 +309,17 @@ namespace Echo.Harness.Application
         private async UniTask FaultTheStreamAsync(Exception exception)
         {
             State = SessionState.Faulted;
+
+            // Waiters are failed before anything else: nothing will ever answer
+            // them once the pump stops, so leaving them pending would hang the
+            // caller until its timeout with no explanation of why.
+            foreach (var pair in new List<KeyValuePair<MessageId, UniTaskCompletionSource<object>>>(
+                pendingRequests))
+            {
+                pair.Value.TrySetException(exception);
+            }
+
+            pendingRequests.Clear();
 
             // The pump returns as soon as this method does, so the token it is
             // running under has no further use. Releasing it here matters

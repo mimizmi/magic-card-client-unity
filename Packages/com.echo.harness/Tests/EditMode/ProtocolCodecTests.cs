@@ -168,5 +168,42 @@ namespace Echo.Harness.Tests.EditMode
                 Is.EquivalentTo(responseIds),
                 "Every fixture response must be paired exactly once in ResponseFor.");
         }
+
+        [Test]
+        public void ResponseFor_KeysAreRequestsNamedForTheirResponse()
+        {
+            // The test above constrains only the values, so a fourth pair could
+            // be added with a plausible but wrong key and still pass. This gates
+            // the keys against the fixture without deriving the table from names.
+            var fixture = ProtocolContractFixture.Load();
+            var byId = new System.Collections.Generic.Dictionary<MessageId, ProtocolMessageDocument>();
+            foreach (var message in fixture.Messages)
+            {
+                byId[(MessageId)message.Id] = message;
+            }
+
+            foreach (var pair in ProtocolMessageMap.ResponseFor)
+            {
+                Assert.That(
+                    byId.ContainsKey(pair.Key),
+                    $"{pair.Key} is not a message in the fixture.");
+                Assert.That(
+                    byId.ContainsKey(pair.Value),
+                    $"{pair.Value} is not a message in the fixture.");
+
+                var request = byId[pair.Key];
+                var response = byId[pair.Value];
+                Assert.That(
+                    request.Kind,
+                    Is.EqualTo("request"),
+                    $"{request.Name} is keyed as a request but the fixture calls it {request.Kind}.");
+                Assert.That(
+                    request.Name.Replace("Request", "Response"),
+                    Is.EqualTo(response.Name),
+                    "The server names each response after its request; a pair that " +
+                    "breaks that convention is far more likely a mis-typed key than " +
+                    "a genuine exception.");
+            }
+        }
     }
 }
