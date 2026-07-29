@@ -21,6 +21,7 @@ Design spec: `docs/superpowers/specs/2026-07-29-protocol-contract-typing-design.
 - Every file created under `Packages/` needs its Unity-generated `.meta` file committed alongside it. Files under `Tools/` are outside Unity's import scope and have no `.meta`.
 - C# DTO naming: `<fixture message name>Dto`, e.g. fixture name `DamageEvent` becomes `DamageEventDto`. Nested view types use their Go name plus `Dto`, e.g. `CardViewDto`.
 - Tests are deterministic EditMode only. No sockets, no live server, no `Thread.Sleep`, no wall-clock dependence.
+- **`omitempty` mapping depends on the C# type.** Use `NullValueHandling.Ignore` for reference types (`string`, `JObject`, nested DTOs) and `DefaultValueHandling.Ignore` for non-nullable value types (`int`, `bool`) — `NullValueHandling.Ignore` is a no-op on a type that can never be null. Never put `DefaultValueHandling.Ignore` on `int? Points` or `int? RawPoints`: it would omit a legitimate `0` alongside `null` and destroy the hidden-value distinction.
 
 ## File Structure
 
@@ -54,6 +55,7 @@ Design spec: `docs/superpowers/specs/2026-07-29-protocol-contract-typing-design.
 | `Packages/com.echo.harness/Runtime/Contracts/Dtos/EventDtos.cs` | ids 5001-5013 |
 | `Packages/com.echo.harness/Runtime/Contracts/ProtocolMessageMap.cs` | `MessageId` to DTO `Type` registry |
 | `Packages/com.echo.harness/Tests/EditMode/ProtocolDtoContractTests.cs` | fixture-driven contract assertions |
+| `Packages/com.echo.harness/Tests/EditMode/ProtocolDtoSerializationTests.cs` | real JSON round-trip behavior, above all hidden-vs-zero points |
 
 File families follow the id ranges already documented in `docs/protocol-contract.md`.
 
@@ -1625,7 +1627,9 @@ namespace Echo.Harness.Contracts
         [JsonProperty("reconnect_token", NullValueHandling = NullValueHandling.Ignore)]
         public string ReconnectToken { get; set; }
 
-        [JsonProperty("in_game", NullValueHandling = NullValueHandling.Ignore)]
+        // bool can never be null, so NullValueHandling.Ignore would be a no-op.
+        // DefaultValueHandling.Ignore reproduces Go's omitempty on a value type.
+        [JsonProperty("in_game", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public bool InGame { get; set; }
 
         [JsonProperty("config_hash", NullValueHandling = NullValueHandling.Ignore)]
@@ -1811,7 +1815,9 @@ namespace Echo.Harness.Contracts
         [JsonProperty("hand_slot")]
         public int HandSlot { get; set; }
 
-        [JsonProperty("target_slot", NullValueHandling = NullValueHandling.Ignore)]
+        // Go: `target_slot,omitempty` with 0 meaning auto. int is a value type,
+        // so DefaultValueHandling.Ignore is what reproduces omitempty here.
+        [JsonProperty("target_slot", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public int TargetSlot { get; set; }
     }
 
@@ -1857,7 +1863,8 @@ namespace Echo.Harness.Contracts
         [JsonProperty("zone", NullValueHandling = NullValueHandling.Ignore)]
         public string Zone { get; set; }
 
-        [JsonProperty("slot", NullValueHandling = NullValueHandling.Ignore)]
+        // Go: `slot,omitempty` on an int. See the omitempty constraint.
+        [JsonProperty("slot", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public int Slot { get; set; }
     }
 
@@ -2196,6 +2203,7 @@ git commit -m "Add event DTOs and retire ProtocolDtos.cs"
 
 **Files:**
 - Create: `Packages/com.echo.harness/Runtime/Contracts/Dtos/StateDtos.cs`
+- Create: `Packages/com.echo.harness/Tests/EditMode/ProtocolDtoSerializationTests.cs`
 - Modify: `Packages/com.echo.harness/Runtime/Contracts/ProtocolMessageMap.cs`
 - Modify: `Packages/com.echo.harness/Tests/EditMode/ProtocolDtoContractTests.cs`
 
@@ -2515,13 +2523,158 @@ Expected: every test passes. `EveryMessageWithAPayload_HasARegisteredDto` now co
 
 If `EveryNestedType_...` fails on the key set, the fixture's `types` differ from the 5 expected names. Re-read the Task 3 Step 7 output line reporting the nested type count before changing the C# side — the fixture is generated and is the source of truth here.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add the JSON round-trip tests**
+
+Everything so far inspects declared contract *metadata*. Nothing has executed a
+real serialization. These tests exercise the behavior the metadata only
+describes — above all that a hidden point value survives as `null` and never
+collapses to `0`.
+
+Create `Packages/com.echo.harness/Tests/EditMode/ProtocolDtoSerializationTests.cs`:
+
+```csharp
+using Echo.Harness.Contracts;
+using Newtonsoft.Json;
+using NUnit.Framework;
+
+namespace Echo.Harness.Tests.EditMode
+{
+    public sealed class ProtocolDtoSerializationTests
+    {
+        // U+2665 heart suit and U+653B U+51FB ("attack" card type), written as
+        // escapes so the test file's own encoding cannot corrupt them.
+        private const string HeartSuit = "♥";
+        private const string AttackCardType = "攻击";
+
+        [Test]
+        public void CardView_HiddenPointsDeserializeToNullNotZero()
+        {
+            var dto = JsonConvert.DeserializeObject<CardViewDto>(
+                "{\"slot\":3,\"suit\":\"" + HeartSuit + "\"," +
+                "\"card_type\":\"" + AttackCardType + "\",\"points\":null}");
+
+            Assert.That(dto.Slot, Is.EqualTo(3));
+            Assert.That(dto.Suit, Is.EqualTo(HeartSuit));
+            Assert.That(dto.CardType, Is.EqualTo(AttackCardType));
+            Assert.That(dto.Points, Is.Null, "A null points value means hidden and must never become 0.");
+            Assert.That(dto.RawPoints, Is.Null, "An absent raw_points must stay null.");
+        }
+
+        [Test]
+        public void CardView_ZeroPointsStaysDistinctFromHidden()
+        {
+            var visible = JsonConvert.DeserializeObject<CardViewDto>(
+                "{\"slot\":1,\"suit\":\"" + HeartSuit + "\",\"card_type\":\"x\",\"points\":0}");
+            var hidden = JsonConvert.DeserializeObject<CardViewDto>(
+                "{\"slot\":1,\"suit\":\"" + HeartSuit + "\",\"card_type\":\"x\",\"points\":null}");
+
+            Assert.That(visible.Points, Is.EqualTo(0));
+            Assert.That(hidden.Points, Is.Null);
+            Assert.That(visible.Points, Is.Not.EqualTo(hidden.Points),
+                "Zero points and hidden points must remain distinguishable.");
+        }
+
+        [Test]
+        public void GameStateEvent_DeserializesTheWholeNestedTree()
+        {
+            const string json =
+                "{\"round\":2,\"phase\":\"action\",\"active_seat\":1,\"field_effect\":\"\"," +
+                "\"pending_attack\":{\"attacker_seat\":0,\"attack_points\":7}," +
+                "\"me\":{\"seat\":1,\"hp\":30,\"max_hp\":50,\"shield_hp\":0,\"energy\":4," +
+                "\"max_energy\":10,\"character\":\"???\",\"is_near_death\":false," +
+                "\"hand\":[{\"slot\":1,\"suit\":\"" + HeartSuit + "\",\"card_type\":\"x\"," +
+                "\"points\":5,\"raw_points\":3}]," +
+                "\"synth_zone\":[],\"extra_info\":{\"rift_count\":2}}," +
+                "\"opponent\":{\"seat\":0,\"hp\":40,\"max_hp\":50,\"shield_hp\":2,\"energy\":1," +
+                "\"max_energy\":10,\"character\":\"???\",\"is_near_death\":false," +
+                "\"hand_count\":6,\"synth_count\":1}}";
+
+            var dto = JsonConvert.DeserializeObject<GameStateEventDto>(json);
+
+            Assert.That(dto.PendingAttack, Is.Not.Null);
+            Assert.That(dto.PendingAttack.AttackPoints, Is.EqualTo(7));
+            Assert.That(dto.Me.Hand, Has.Count.EqualTo(1),
+                "IReadOnlyList<CardViewDto> must deserialize.");
+            Assert.That(dto.Me.Hand[0].Points, Is.EqualTo(5));
+            Assert.That(dto.Me.Hand[0].RawPoints, Is.EqualTo(3));
+            Assert.That(dto.Me.Hand[0].Suit, Is.EqualTo(HeartSuit));
+            Assert.That(dto.Me.SynthZone, Is.Empty);
+            Assert.That((int)dto.Me.ExtraInfo["rift_count"], Is.EqualTo(2));
+            Assert.That(dto.Opponent.HandCount, Is.EqualTo(6));
+            Assert.That(dto.Opponent.PublicExtra, Is.Null,
+                "An absent public_extra must stay null.");
+        }
+
+        [Test]
+        public void GameStateEvent_AbsentPendingAttackMeansNoDefenseWindow()
+        {
+            var dto = JsonConvert.DeserializeObject<GameStateEventDto>(
+                "{\"round\":1,\"phase\":\"draw\",\"active_seat\":0,\"field_effect\":\"\"}");
+
+            Assert.That(dto.PendingAttack, Is.Null);
+        }
+
+        [Test]
+        public void MoveToSynthesisRequest_OmitsTheDefaultTargetSlot()
+        {
+            Assert.That(
+                JsonConvert.SerializeObject(new MoveToSynthesisRequestDto { HandSlot = 2 }),
+                Is.EqualTo("{\"hand_slot\":2}"),
+                "target_slot carries omitempty in Go and must vanish at its default.");
+
+            Assert.That(
+                JsonConvert.SerializeObject(
+                    new MoveToSynthesisRequestDto { HandSlot = 2, TargetSlot = 3 }),
+                Is.EqualTo("{\"hand_slot\":2,\"target_slot\":3}"));
+        }
+
+        [Test]
+        public void MoveToSynthesisRequest_KeepsAZeroHandSlot()
+        {
+            Assert.That(
+                JsonConvert.SerializeObject(new MoveToSynthesisRequestDto()),
+                Is.EqualTo("{\"hand_slot\":0}"),
+                "hand_slot has no omitempty in Go and must always be sent.");
+        }
+
+        [Test]
+        public void DefenseRequest_OmitsZoneAndSlotWhenPassing()
+        {
+            Assert.That(
+                JsonConvert.SerializeObject(new DefenseRequestDto { Pass = true }),
+                Is.EqualTo("{\"pass\":true}"));
+        }
+
+        [Test]
+        public void LoginRequest_OmitsANullReconnectToken()
+        {
+            Assert.That(
+                JsonConvert.SerializeObject(new LoginRequestDto { PlayerName = "echo" }),
+                Is.EqualTo("{\"player_name\":\"echo\"}"));
+        }
+    }
+}
+```
+
+If `GameStateEvent_DeserializesTheWholeNestedTree` fails on `Me.Hand`, Newtonsoft
+cannot materialize `IReadOnlyList<CardViewDto>` in this configuration. Change the
+DTO property to `IReadOnlyList<CardViewDto>` backed by a `List<CardViewDto>`
+setter only if that is genuinely the cause — verify with the actual exception
+before changing the contract shape.
+
+- [ ] **Step 6: Run the full EditMode suite again**
+
+Call Unity MCP `recompile`, wait for `recompile_status`, then `run_tests` with mode `editor`.
+
+Expected: every test passes, including the 8 new serialization tests.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git status --short Packages/com.echo.harness/
 git add Packages/com.echo.harness/Runtime/Contracts/ \
-        Packages/com.echo.harness/Tests/EditMode/ProtocolDtoContractTests.cs
-git commit -m "Add state DTOs and the contract completeness gate"
+        Packages/com.echo.harness/Tests/EditMode/
+git commit -m "Add state DTOs, the completeness gate, and JSON round-trip tests"
 ```
 
 ---
@@ -2707,5 +2860,6 @@ git commit -m "Document the generated protocol fixture and its drift gate"
 - 35 payload-carrying messages have registered DTOs; the 4 payload-free messages have none.
 - All 5 nested types have registered DTOs matching the fixture.
 - Every fixture field carrying a `type_ref` maps to the matching nested DTO, with `IReadOnlyList<T>` unwrapped for repeated fields.
+- A real JSON round trip proves `"points": null` stays `null` and stays distinguishable from `"points": 0`.
 - `.\Tools\ci\verify.ps1` passes end to end.
 - Corrupting any JSON tag name in the fixture makes `verify-architecture.ps1` fail.
