@@ -204,8 +204,28 @@ namespace Echo.Harness.Application
             }
         }
 
-        public UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+        public async UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken)
+        {
+            var sentAt = clock.UtcNow;
+            var request = new ClientPingRequestDto { Ts = sentAt.ToUnixTimeMilliseconds() };
+
+            var response = await RequestAsync<ClientPingResponseDto>(
+                MessageId.ClientPingRequest, request, DefaultRequestTimeout, cancellationToken);
+
+            if (response.Ts != request.Ts)
+            {
+                var diagnostic =
+                    $"ClientPingResponse echoed ts {response.Ts} for a request that sent " +
+                    $"{request.Ts}.";
+                PublishFault(new SessionFault(
+                    SessionFaultKind.CorrelationMismatch,
+                    MessageId.ClientPingResponse,
+                    diagnostic));
+                throw new InvalidOperationException(diagnostic);
+            }
+
+            return clock.UtcNow - sentAt;
+        }
 
         public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler)
         {

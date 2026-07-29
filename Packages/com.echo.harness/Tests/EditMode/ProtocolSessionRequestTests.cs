@@ -331,6 +331,127 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(failure.Message, Does.Contain("disposed before the response arrived"));
         }
 
+        [Test]
+        public void ProbeRoundTripAsync_MeasuresTheIntervalTheClockAdvanced()
+        {
+            var transport = new FakeTransport();
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            using var session = StartedSession(transport, clock);
+            var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
+
+            var pending = session.ProbeRoundTripAsync(default).Preserve();
+            clock.Advance(TimeSpan.FromMilliseconds(120));
+            transport.EnqueueInbound(Frame(
+                MessageId.ClientPingResponse, "{\"ts\":" + sentAt + "}"));
+
+            Assert.That(
+                pending.GetAwaiter().GetResult(),
+                Is.EqualTo(TimeSpan.FromMilliseconds(120)));
+        }
+
+        [Test]
+        public void ProbeRoundTripAsync_SendsTheClockTimestamp()
+        {
+            var transport = new FakeTransport();
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            using var session = StartedSession(transport, clock);
+            var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
+
+            var pending = session.ProbeRoundTripAsync(default).Preserve();
+
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0].MessageId, Is.EqualTo(MessageId.ClientPingRequest));
+            Assert.That(
+                Encoding.UTF8.GetString(transport.Sent[0].Payload),
+                Is.EqualTo("{\"ts\":" + sentAt + "}"));
+
+            transport.EnqueueInbound(Frame(
+                MessageId.ClientPingResponse, "{\"ts\":" + sentAt + "}"));
+            pending.GetAwaiter().GetResult();
+        }
+
+        [Test]
+        public void ProbeRoundTripAsync_RejectsAMismatchedEcho()
+        {
+            var transport = new FakeTransport();
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            using var session = StartedSession(transport, clock);
+            var faults = new System.Collections.Generic.List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+
+            var pending = session.ProbeRoundTripAsync(default).Preserve();
+            transport.EnqueueInbound(Frame(MessageId.ClientPingResponse, "{\"ts\":999}"));
+
+            // A latency number derived from an unrelated reply looks perfectly
+            // plausible, which is exactly why it must not be returned.
+            Assert.Throws<InvalidOperationException>(() => pending.GetAwaiter().GetResult());
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.CorrelationMismatch));
+        }
+
+        [Test]
+        public void ProbeRoundTripAsync_RejectsAnAbandonedProbesEchoAfterARetry()
+        {
+            var transport = new FakeTransport();
+
+            // Deliberately not the epoch. At ts 0 a stale echo carries the same
+            // value as a ts field that was never deserialized at all, so the
+            // assertions below would hold for the wrong reason.
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(7));
+            using var session = StartedSession(transport, clock);
+            var faults = new System.Collections.Generic.List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+
+            // The first probe is abandoned by cancellation rather than by waiting
+            // out DefaultRequestTimeout, which is ten seconds and is not a
+            // parameter of ProbeRoundTripAsync. Both routes leave the same state
+            // behind - no pending entry for ClientPingResponse, and a reply still
+            // owed by the server - and only one of them is deterministic.
+            var abandonedTs = clock.UtcNow.ToUnixTimeMilliseconds();
+            using var abandon = new CancellationTokenSource();
+            var abandoned = session.ProbeRoundTripAsync(abandon.Token).Preserve();
+            abandon.Cancel();
+            Assert.Throws<OperationCanceledException>(() => abandoned.GetAwaiter().GetResult());
+
+            clock.Advance(TimeSpan.FromMilliseconds(500));
+            var retriedTs = clock.UtcNow.ToUnixTimeMilliseconds();
+            var retried = session.ProbeRoundTripAsync(default).Preserve();
+            Assert.That(transport.Sent, Has.Count.EqualTo(2));
+            Assert.That(
+                Encoding.UTF8.GetString(transport.Sent[1].Payload),
+                Is.EqualTo("{\"ts\":" + retriedTs + "}"),
+                "A retry must carry its own timestamp, not repeat the abandoned one.");
+
+            // Now the ABANDONED probe's reply lands, with the retry waiting for
+            // one of its own. Nothing in the frame distinguishes the two, and the
+            // interval the clock has moved since the retry went out - 40ms - is a
+            // completely believable latency, so a session without the echo check
+            // would report a number that is wrong and looks right.
+            clock.Advance(TimeSpan.FromMilliseconds(40));
+            transport.EnqueueInbound(Frame(
+                MessageId.ClientPingResponse, "{\"ts\":" + abandonedTs + "}"));
+
+            var failure = Assert.Throws<InvalidOperationException>(
+                () => retried.GetAwaiter().GetResult());
+            Assert.That(failure.Message, Does.Contain(abandonedTs.ToString()));
+            Assert.That(failure.Message, Does.Contain(retriedTs.ToString()));
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.CorrelationMismatch));
+
+            // Rejecting one stale echo must not disable the probe for good. The
+            // throw happens after RequestAsync has already returned, so its
+            // finally has released the single-flight gate and a further probe is
+            // still both sendable and answerable.
+            var recovered = session.ProbeRoundTripAsync(default).Preserve();
+            clock.Advance(TimeSpan.FromMilliseconds(25));
+            transport.EnqueueInbound(Frame(
+                MessageId.ClientPingResponse, "{\"ts\":" + (retriedTs + 40) + "}"));
+
+            Assert.That(
+                recovered.GetAwaiter().GetResult(),
+                Is.EqualTo(TimeSpan.FromMilliseconds(25)));
+        }
+
         private static async UniTask<SessionState> StateSeenByAFailedRequest(
             ProtocolSession session)
         {
