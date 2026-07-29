@@ -13,6 +13,8 @@ namespace Echo.Harness.Application
         private readonly ITransport transport;
         private readonly IClock clock;
         private readonly List<Action<SessionFault>> faultHandlers = new List<Action<SessionFault>>();
+        private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
+            new Dictionary<MessageId, List<Action<object>>>();
 
         private CancellationTokenSource pumpCancellation;
         private bool disposed;
@@ -65,8 +67,41 @@ namespace Echo.Harness.Application
         public UniTask SendAsync(
             MessageId messageId,
             object payload,
-            CancellationToken cancellationToken) =>
-            throw new NotImplementedException();
+            CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            if (State != SessionState.Connected)
+            {
+                throw new InvalidOperationException(
+                    $"A message can only be sent from a Connected session; it is {State}.");
+            }
+
+            var hasContract = ProtocolMessageMap.PayloadTypes.TryGetValue(
+                messageId, out var expectedType);
+            if (payload == null)
+            {
+                if (hasContract)
+                {
+                    throw new ArgumentException(
+                        $"{messageId} requires a {expectedType.Name} payload.", nameof(payload));
+                }
+            }
+            else if (!hasContract)
+            {
+                throw new ArgumentException(
+                    $"{messageId} carries no payload.", nameof(payload));
+            }
+            else if (payload.GetType() != expectedType)
+            {
+                throw new ArgumentException(
+                    $"{messageId} expects {expectedType.Name}, not {payload.GetType().Name}.",
+                    nameof(payload));
+            }
+
+            return transport.SendAsync(
+                new TransportMessage(messageId, ProtocolCodec.EncodePayload(payload)),
+                cancellationToken);
+        }
 
         public UniTask<TResponse> RequestAsync<TResponse>(
             MessageId requestId,
@@ -78,8 +113,38 @@ namespace Echo.Harness.Application
         public UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken) =>
             throw new NotImplementedException();
 
-        public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler) =>
-            throw new NotImplementedException();
+        public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler)
+        {
+            ThrowIfDisposed();
+            if (handler == null)
+            {
+                throw new ArgumentNullException(nameof(handler));
+            }
+
+            if (!ProtocolMessageMap.PayloadTypes.TryGetValue(messageId, out var expectedType))
+            {
+                throw new ArgumentException(
+                    $"{messageId} carries no payload and cannot be subscribed to.",
+                    nameof(messageId));
+            }
+
+            if (expectedType != typeof(TPayload))
+            {
+                throw new ArgumentException(
+                    $"{messageId} carries {expectedType.Name}, not {typeof(TPayload).Name}.",
+                    nameof(TPayload));
+            }
+
+            if (!subscribers.TryGetValue(messageId, out var handlers))
+            {
+                handlers = new List<Action<object>>();
+                subscribers[messageId] = handlers;
+            }
+
+            Action<object> boxed = payload => handler((TPayload)payload);
+            handlers.Add(boxed);
+            return new Subscription(() => handlers.Remove(boxed));
+        }
 
         public IDisposable SubscribeToFaults(Action<SessionFault> handler)
         {
@@ -103,6 +168,7 @@ namespace Echo.Harness.Application
             disposed = true;
             CancelPump();
             faultHandlers.Clear();
+            subscribers.Clear();
             State = SessionState.Disconnected;
         }
 
@@ -140,6 +206,39 @@ namespace Echo.Harness.Application
                         : SessionFaultKind.MalformedPayload,
                     message.MessageId,
                     result.Diagnostic));
+                return;
+            }
+
+            DeliverToSubscribers(result);
+        }
+
+        /// <summary>
+        /// Each handler gets its own try, and deliberately so. Dispatch runs on
+        /// the pump's stack outside its try block, so an escaping subscriber
+        /// exception would surface as an unobserved task exception and kill the
+        /// pump with the connection still open. Catching per handler also keeps
+        /// one broken subscriber from silencing the ones queued behind it.
+        /// </summary>
+        private void DeliverToSubscribers(ProtocolDecodeResult result)
+        {
+            if (!subscribers.TryGetValue(result.MessageId, out var handlers))
+            {
+                return;
+            }
+
+            foreach (var handler in handlers.ToArray())
+            {
+                try
+                {
+                    handler(result.Payload);
+                }
+                catch (Exception exception)
+                {
+                    PublishFault(new SessionFault(
+                        SessionFaultKind.SubscriberFailure,
+                        result.MessageId,
+                        exception.Message));
+                }
             }
         }
 
