@@ -34,6 +34,8 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(result.Succeeded, Is.True);
             Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.None));
+            // The dispatcher keys on this, so it has to survive the round trip.
+            Assert.That(result.MessageId, Is.EqualTo(MessageId.LoginResponse));
             var payload = (LoginResponseDto)result.Payload;
             Assert.That(payload.Success, Is.True);
             Assert.That(payload.PlayerId, Is.EqualTo("p-1"));
@@ -60,6 +62,7 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(result.Succeeded, Is.True);
             Assert.That(result.Payload, Is.Null);
+            Assert.That(result.MessageId, Is.EqualTo(MessageId.Ping));
         }
 
         [Test]
@@ -70,6 +73,9 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(result.Succeeded, Is.False);
             Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.UnknownMessageId));
             Assert.That(result.Diagnostic, Does.Contain("9999"));
+            // A failure still has to name the message it came from, or the caller
+            // cannot say which message it dropped.
+            Assert.That(result.MessageId, Is.EqualTo((MessageId)9999));
         }
 
         [Test]
@@ -81,6 +87,10 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(result.Succeeded, Is.False);
             Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.MalformedPayload));
             Assert.That(result.Diagnostic, Is.Not.Empty);
+            Assert.That(result.MessageId, Is.EqualTo(MessageId.LoginResponse));
+            // The exception type is part of the diagnostic so that a throw from
+            // somewhere other than the reader is not disguised as bad input.
+            Assert.That(result.Diagnostic, Does.Contain("Exception"));
         }
 
         [Test]
@@ -93,6 +103,34 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(result.Succeeded, Is.False);
             Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.MalformedPayload));
+            Assert.That(result.Diagnostic, Does.Contain("empty"));
+        }
+
+        [Test]
+        public void Decode_TreatsANullBodyLikeAnEmptyOne()
+        {
+            // A transport that reads a zero-length frame may hand back null rather
+            // than an empty array; that must not be the one input that throws.
+            var result = ProtocolCodec.Decode(MessageId.LoginResponse, null);
+
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.MalformedPayload));
+            Assert.That(result.Diagnostic, Does.Contain("empty"));
+        }
+
+        [Test]
+        public void Decode_DistinguishesALiteralNullBodyFromAnEmptyOne()
+        {
+            // Both fail, but a body of "null" is a sender that wrote something,
+            // not a sender that wrote nothing. Logging them identically would
+            // send someone hunting the wrong fault.
+            var result = ProtocolCodec.Decode(
+                MessageId.LoginResponse, Encoding.UTF8.GetBytes("null"));
+
+            Assert.That(result.Succeeded, Is.False);
+            Assert.That(result.Failure, Is.EqualTo(ProtocolDecodeFailure.MalformedPayload));
+            Assert.That(result.Diagnostic, Does.Contain("null"));
+            Assert.That(result.Diagnostic, Does.Not.Contain("empty"));
         }
     }
 }

@@ -79,11 +79,13 @@ namespace Echo.Harness.Contracts
                 return ProtocolDecodeResult.Ok(messageId, null);
             }
 
-            var json = payload == null ? string.Empty : Encoding.UTF8.GetString(payload);
+            // Everything from the byte decode onwards sits inside the try, so the
+            // "never throws" guarantee covers the whole conversion and not just
+            // the deserializer.
             try
             {
-                var dto = JsonConvert.DeserializeObject(json, payloadType);
-                if (dto == null)
+                var json = payload == null ? string.Empty : Encoding.UTF8.GetString(payload);
+                if (string.IsNullOrWhiteSpace(json))
                 {
                     return ProtocolDecodeResult.Failed(
                         messageId,
@@ -91,14 +93,30 @@ namespace Echo.Harness.Contracts
                         $"{messageId} expects a {payloadType.Name} body but the payload was empty.");
                 }
 
+                var dto = JsonConvert.DeserializeObject(json, payloadType);
+                if (dto == null)
+                {
+                    // Distinct from the empty case: the sender wrote a body, and
+                    // that body was the JSON literal null.
+                    return ProtocolDecodeResult.Failed(
+                        messageId,
+                        ProtocolDecodeFailure.MalformedPayload,
+                        $"{messageId} expects a {payloadType.Name} body but the payload was the JSON literal null.");
+                }
+
                 return ProtocolDecodeResult.Ok(messageId, dto);
             }
-            catch (JsonException exception)
+            catch (Exception exception)
             {
+                // Deliberately broad. A DTO could acquire a custom JsonConverter
+                // that throws something other than a JsonException, and Task 4's
+                // receive pump is built on this method never throwing. The only
+                // thing this can swallow is a bug in the lines above, which the
+                // exception type name in the diagnostic makes visible.
                 return ProtocolDecodeResult.Failed(
                     messageId,
                     ProtocolDecodeFailure.MalformedPayload,
-                    exception.Message);
+                    $"{exception.GetType().Name}: {exception.Message}");
             }
         }
     }
