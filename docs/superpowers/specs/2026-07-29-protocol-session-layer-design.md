@@ -245,8 +245,14 @@ would fail on the first idle iteration. Required changes:
   later `EnqueueInbound`.
 - Add `FailNextReceive(Exception)` so the stream-desynchronization path can be
   driven from a test.
-- `DeterministicFakesTests.FakeTransport_RecordsOutboundFramesAndDequeuesInboundFrames`
-  may assert the current throwing behavior and will need updating.
+Verified: `DeterministicFakesTests.FakeTransport_RecordsOutboundFramesAndDequeuesInboundFrames`
+enqueues before receiving and never exercises the empty-queue throw, so the change is
+backward compatible with the existing suite.
+
+The awaited task must complete its continuation synchronously from `EnqueueInbound`.
+That is what makes session tests deterministic: by the time `EnqueueInbound` returns,
+the pump has already decoded and dispatched the message, so a test can assert
+immediately without polling or sleeping.
 
 ## Testing
 
