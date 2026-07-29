@@ -151,6 +151,14 @@ namespace Echo.Harness.Application
         private async UniTask FaultTheStreamAsync(Exception exception)
         {
             State = SessionState.Faulted;
+
+            // The pump returns as soon as this method does, so the token it is
+            // running under has no further use. Releasing it here matters
+            // because it is linked to the token the caller passed to StartAsync,
+            // which outlives the session; leaving it registered would pin this
+            // session on an application-lifetime token until disposal.
+            CancelPump();
+
             try
             {
                 await transport.DisconnectAsync(CancellationToken.None);

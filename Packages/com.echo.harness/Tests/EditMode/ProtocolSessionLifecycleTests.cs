@@ -57,11 +57,72 @@ namespace Echo.Harness.Tests.EditMode
             session.StartAsync(default).GetAwaiter().GetResult();
 
             transport.EnqueueInbound(Frame((MessageId)9999, "{}"));
+            transport.EnqueueInbound(Frame((MessageId)9998, "{}"));
 
-            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults, Has.Count.EqualTo(2),
+                "The second fault proves the pump kept reading past the first unknown id.");
             Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.UnknownMessageId));
+            Assert.That(faults[0].MessageId, Is.EqualTo((MessageId)9999));
             Assert.That(session.State, Is.EqualTo(SessionState.Connected),
                 "An unknown id is version drift, not a reason to drop the player.");
+        }
+
+        [Test]
+        public void Pump_PublishesNoFaultForAWellFormedFrame()
+        {
+            var transport = new FakeTransport();
+            using var session = NewSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            session.StartAsync(default).GetAwaiter().GetResult();
+
+            transport.EnqueueInbound(Frame(
+                MessageId.LoginResponse,
+                "{\"success\":true,\"player_id\":\"p-1\",\"reconnect_token\":\"t-1\"}"));
+
+            Assert.That(faults, Is.Empty,
+                "A fault means something failed; a message that decodes cleanly is not a failure.");
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+        }
+
+        [Test]
+        public void StopAsync_FromConnectedDisconnectsAndStopsThePump()
+        {
+            var transport = new FakeTransport();
+            using var session = NewSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            session.StartAsync(default).GetAwaiter().GetResult();
+
+            session.StopAsync(default).GetAwaiter().GetResult();
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+            Assert.That(transport.State, Is.EqualTo(TransportState.Disconnected));
+
+            // A frame that would otherwise fault proves the pump is no longer reading.
+            transport.EnqueueInbound(Frame((MessageId)9999, "{}"));
+            Assert.That(faults, Is.Empty, "A stopped session must not dispatch anything.");
+        }
+
+        [Test]
+        public void Dispose_RejectsFurtherUseAndSilencesFaultSubscriptions()
+        {
+            var transport = new FakeTransport();
+            using var session = NewSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            session.StartAsync(default).GetAwaiter().GetResult();
+
+            session.Dispose();
+
+            Assert.Throws<ObjectDisposedException>(
+                () => session.StartAsync(default).GetAwaiter().GetResult());
+            Assert.Throws<ObjectDisposedException>(
+                () => session.SubscribeToFaults(_ => { }));
+
+            transport.EnqueueInbound(Frame((MessageId)9999, "{}"));
+            Assert.That(faults, Is.Empty,
+                "Disposal must stop the pump and drop the handlers it would have called.");
         }
 
         [Test]
