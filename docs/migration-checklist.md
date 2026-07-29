@@ -10,7 +10,10 @@ deliverable.
 - [x] Clean Architecture assemblies and dependency gate.
 - [x] UI Toolkit MVVM, R3, UniTask, VContainer, and Addressables compile seams.
 - [x] Controlled `ILuaRuntime` seam with optional xLua capability probe.
-- [x] Machine-readable 39-message protocol baseline.
+- [x] Machine-readable 39-message protocol baseline, generated from the Go source by
+  `Tools/protocol` and gated against it by byte comparison.
+- [x] Typed DTOs for all 39 messages and the five nested view types, asserted against
+  the generated fixture by `ProtocolDtoContractTests`.
 - [x] Deterministic transport/content/Lua/time fakes.
 - [x] EditMode, PlayMode, static, local aggregate, and CI entry points.
 - [ ] Assign real CODEOWNERS teams in `.github/CODEOWNERS`.
@@ -40,9 +43,13 @@ deliverable.
 
 ## Phase 3 — battle parity
 
-- [ ] Migrate every message as a typed contract before consuming it.
-- [ ] Preserve server authority and hidden-information boundaries.
-- [ ] Resolve all documented Godot/Go JSON drift explicitly.
+- [x] Migrate every message as a typed contract before consuming it.
+- [ ] Preserve server authority and hidden-information boundaries. The contract layer
+  now encodes the two structural rules — `CardView` points stay `int?` and
+  `OpponentView` exposes no hand — but no use case consumes them yet.
+- [ ] Resolve all documented Godot/Go JSON drift explicitly. The three JSON naming
+  rows in `docs/protocol-contract.md` are resolved in favor of the Go names; the
+  disconnect lifecycle result is still undefined.
 - [ ] Verify all 18 server-defined characters; do not copy the old count.
 - [ ] Add deterministic replay fixtures for phase, card, damage, defense,
   liberation, revival, surrender, timeout, and game-over paths.
