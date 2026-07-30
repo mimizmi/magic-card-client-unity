@@ -16,7 +16,8 @@ namespace Echo.Harness.Application
         MalformedPayload,
         CorrelationMismatch,
         SubscriberFailure,
-        TransportFailure
+        TransportFailure,
+        DispatchFailure
     }
 
     /// <summary>

@@ -17,9 +17,34 @@ namespace Echo.Harness.TestKit
     {
         private readonly List<int> observedThreadIds = new List<int>();
 
-        public IReadOnlyList<int> ObservedThreadIds => observedThreadIds;
+        /// <summary>
+        /// A snapshot, taken under the same lock the recording takes. The tool
+        /// that proves thread confinement is itself called from more than one
+        /// thread - a request timeout records from the CancelAfter timer while
+        /// the test thread reads - so an unsynchronized List would let the
+        /// evidence tear the very race it exists to rule out.
+        /// </summary>
+        public IReadOnlyList<int> ObservedThreadIds
+        {
+            get
+            {
+                lock (observedThreadIds)
+                {
+                    return new List<int>(observedThreadIds);
+                }
+            }
+        }
 
-        public int SwitchCount => observedThreadIds.Count;
+        public int SwitchCount
+        {
+            get
+            {
+                lock (observedThreadIds)
+                {
+                    return observedThreadIds.Count;
+                }
+            }
+        }
 
         /// <summary>Makes the next switch fail. One-shot.</summary>
         public Exception NextFailure { get; set; }
@@ -35,7 +60,11 @@ namespace Echo.Harness.TestKit
                 throw failure;
             }
 
-            observedThreadIds.Add(Thread.CurrentThread.ManagedThreadId);
+            lock (observedThreadIds)
+            {
+                observedThreadIds.Add(Thread.CurrentThread.ManagedThreadId);
+            }
+
             return UniTask.CompletedTask;
         }
     }
