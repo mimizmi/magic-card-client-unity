@@ -10,6 +10,13 @@ namespace Echo.Harness.Application
     {
         public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(10);
 
+        /// <summary>
+        /// How long a Dispose-initiated disconnect is given before it is abandoned.
+        /// Short on purpose: Dispose has no caller waiting on it, and a close that
+        /// has not completed by now will not start helping.
+        /// </summary>
+        public static readonly TimeSpan DisposeDisconnectDeadline = TimeSpan.FromSeconds(2);
+
         private readonly ITransport transport;
         private readonly IClock clock;
         private readonly ISessionScheduler scheduler;
@@ -63,19 +70,36 @@ namespace Echo.Harness.Application
                 return;
             }
 
-            CancelPump();
-            await transport.DisconnectAsync(cancellationToken);
-            State = SessionState.Disconnected;
+            // Captured before the state changes. The fault path has already closed
+            // the transport, and a second DisconnectAsync is idempotent on the fake
+            // and on a well-behaved socket but not on every transport.
+            var alreadyDisconnected = State == SessionState.Faulted;
 
-            // Waiters are failed last, after the state transition, and the order
-            // is deliberate. TrySetException resumes each waiter inline on this
-            // stack, so a waiter is free to re-enter the session before StopAsync
-            // returns. Reaching Disconnected first means such a call is refused
-            // with the truth; failing them earlier would let a re-entrant request
-            // pass the Connected check and then park forever on a cancelled pump.
-            FailPendingRequests(new InvalidOperationException(
-                "The session was stopped before the response arrived. The request " +
-                "may still have reached the server; stopping does not cancel it."));
+            CancelPump();
+            try
+            {
+                if (!alreadyDisconnected)
+                {
+                    await transport.DisconnectAsync(cancellationToken);
+                }
+            }
+            finally
+            {
+                // In the finally, not after the await. A throwing disconnect - or
+                // an already-cancelled token, which is a realistic shutdown
+                // pattern - would otherwise strand every waiter and leave State
+                // reading Connected over a dead pump.
+                //
+                // The state transition still precedes the failures, for the reason
+                // it always did: TrySetException resumes each waiter inline on this
+                // stack, so a waiter is free to re-enter the session before this
+                // method returns, and reaching Disconnected first means such a call
+                // is refused with the truth.
+                State = SessionState.Disconnected;
+                FailPendingRequests(new InvalidOperationException(
+                    "The session was stopped before the response arrived. The request " +
+                    "may still have reached the server; stopping does not cancel it."));
+            }
         }
 
         public UniTask SendAsync(
@@ -290,6 +314,12 @@ namespace Echo.Harness.Application
 
             disposed = true;
             CancelPump();
+
+            // Whether there is a connection to close is decided before State is
+            // reset. Disposing a session that was never started must not call
+            // DisconnectAsync on a transport that was never connected.
+            var closing = State != SessionState.Disconnected;
+
             faultHandlers.Clear();
             subscribers.Clear();
             State = SessionState.Disconnected;
@@ -300,9 +330,42 @@ namespace Echo.Harness.Application
             // it would then wait out its full timeout and report a network
             // failure that never happened. Disposal is synchronous, but so is
             // TrySetException, so there is nothing here that needs awaiting.
+            //
+            // Before the disconnect is launched, not after: a transport whose
+            // close releases a parked receive resumes the pump inline, and a
+            // waiter resumed from there would otherwise see a half-cleared gate.
             FailPendingRequests(new ObjectDisposedException(
                 nameof(ProtocolSession),
                 "The session was disposed before the response arrived."));
+
+            if (closing)
+            {
+                DisconnectOnDisposeAsync().Forget();
+            }
+        }
+
+        /// <summary>
+        /// The disconnect Dispose cannot await. Bounded fire-and-forget was chosen
+        /// over a documented "stop before disposing" contract because leaving the
+        /// socket open makes the server hold the session until its 35 second pong
+        /// timeout, so a player who quits leaves a ghost behind.
+        ///
+        /// The try/catch is required rather than tidy: this runs with no caller on
+        /// the stack, so an escaping exception would reach the unobserved-exception
+        /// handler and be reported as an unrelated crash. There is nowhere to
+        /// publish a fault either - Dispose has already cleared the handlers.
+        /// </summary>
+        private async UniTaskVoid DisconnectOnDisposeAsync()
+        {
+            try
+            {
+                using var deadline = new CancellationTokenSource(DisposeDisconnectDeadline);
+                await transport.DisconnectAsync(deadline.Token);
+            }
+            catch
+            {
+                // Nothing to tell, and no one left to tell it to.
+            }
         }
 
         private async UniTaskVoid RunPumpAsync(CancellationToken cancellationToken)

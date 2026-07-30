@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
@@ -169,6 +170,115 @@ namespace Echo.Harness.Tests.EditMode
             transport.EnqueueInbound(Frame((MessageId)9999, "{}"));
 
             Assert.That(faults, Is.Empty);
+        }
+
+        [Test]
+        public void StopAsyncFailsWaitersEvenWhenDisconnectThrows()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None);
+
+            transport.FailNextDisconnect(new IOException("socket already gone"));
+
+            Assert.Throws<IOException>(
+                () => session.StopAsync(CancellationToken.None).GetAwaiter().GetResult());
+
+            var failure = Assert.Throws<InvalidOperationException>(
+                () => pending.GetAwaiter().GetResult());
+            Assert.That(failure.Message, Does.Contain("stopped before the response"));
+        }
+
+        [Test]
+        public void StopAsyncFailsWaitersWhenHandedAnAlreadyCancelledToken()
+        {
+            var session = CreateSession(out _, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None);
+
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+
+            Assert.Throws<OperationCanceledException>(
+                () => session.StopAsync(cancelled.Token).GetAwaiter().GetResult());
+            Assert.Throws<InvalidOperationException>(() => pending.GetAwaiter().GetResult());
+        }
+
+        [Test]
+        public void DisposeRequestsATransportDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            session.Dispose();
+
+            Assert.That(transport.DisconnectCount, Is.EqualTo(1),
+                "An undisconnected socket leaves the server holding a ghost session " +
+                "until its 35 second pong timeout.");
+        }
+
+        [Test]
+        public void DisposeSurvivesAThrowingDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+            transport.FailNextDisconnect(new IOException("socket already gone"));
+
+            Assert.DoesNotThrow(() => session.Dispose());
+        }
+
+        [Test]
+        public void DisposeOnANeverStartedSessionDoesNotTouchTheTransport()
+        {
+            var session = CreateSession(out var transport, out _);
+
+            session.Dispose();
+
+            Assert.That(transport.DisconnectCount, Is.EqualTo(0),
+                "There is nothing to close, and calling DisconnectAsync on an " +
+                "unconnected transport is not universally safe.");
+        }
+
+        [Test]
+        public void StopAsyncFromFaultedReachesDisconnectedWithoutASecondDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            transport.FailNextReceive(new IOException("stream desynchronized"));
+            Assert.That(session.State, Is.EqualTo(SessionState.Faulted));
+            var disconnectsAfterFault = transport.DisconnectCount;
+
+            session.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+            Assert.That(transport.DisconnectCount, Is.EqualTo(disconnectsAfterFault),
+                "The fault path already disconnected, and a second close is not " +
+                "idempotent on every real transport.");
+        }
+
+        [Test]
+        public void AFaultedSessionCanBeStoppedAndStartedAgain()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+            transport.FailNextReceive(new IOException("stream desynchronized"));
+            session.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.DoesNotThrow(
+                () => session.StartAsync(CancellationToken.None).GetAwaiter().GetResult());
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                "This is the seam reconnect will use next iteration.");
         }
     }
 }
