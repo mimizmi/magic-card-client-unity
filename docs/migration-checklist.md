@@ -44,11 +44,11 @@ deliverable.
   reaches `Disconnected`, and lets `StartAsync` succeed again, so restart-after-fault
   exists today undesigned and untested.
 - [ ] Make `ProtocolSession` safe for the second thread a real socket introduces.
-  `pendingRequests` is a plain `Dictionary` and `State` an ordinary auto-property, both written
-  from the pump's stack and from the `CancelAfter` timer's thread-pool thread, where a
-  concurrent resize can misroute a response to subscribers; a caller awaiting
-  `RequestAsync` also resumes off the main thread after a timeout. Check the deadline
-  on the pump or hop explicitly.
+  `pendingRequests` is a plain `Dictionary` and `State` an ordinary auto-property,
+  both written from the pump's stack and from the `CancelAfter` timer's thread-pool
+  thread, where a concurrent resize can misroute a response to subscribers; a caller
+  awaiting `RequestAsync` also resumes off the main thread after a timeout. Check the
+  deadline on the pump or hop explicitly.
 - [ ] Close `Dispatch` sitting outside the receive pump's `try`. `State` can read
   `Connected` for a pump that a `Dispatch`-internal exception already killed, and each
   callee is individually responsible for not throwing, so a future branch inherits no
@@ -82,14 +82,14 @@ deliverable.
   continuation is contained but never reported, because `TrySetException` on an
   already-completed core returns `false`.
 - [ ] Publish the root-cause receive failure before the disconnect failure in
-  `FaultTheStreamAsync` (`ProtocolSession.cs:456-463`). A consumer that reads the first
+  `FaultTheStreamAsync` (`ProtocolSession.cs:458-471`). A consumer that reads the first
   `TransportFailure` — the natural thing to do — currently gets the symptom rather than
   the cause.
 - [ ] Resolve the contradiction over `SessionFault.MessageId` for `TransportFailure`:
   pick one meaning and make the design and the code agree. The design calls the field
   "meaningless for `TransportFailure`" while the heartbeat path populates it with
-  `MessageId.Pong` (`ProtocolSession.cs:391-394`) and the stream fault passes `default`
-  (`:458`, `:463`). `Kind` is identical on all three, so that field is the only thing
+  `MessageId.Pong` (`ProtocolSession.cs:399-402`) and the stream fault passes `default`
+  (`:466`, `:471`). `Kind` is identical on all three, so that field is the only thing
   separating "the heartbeat write failed, the connection is probably still usable" from
   "the stream desynchronized", and a maintainer trusting the design would delete it.
 - [ ] Settle one assertion convention for `SessionFault` contents and apply it across

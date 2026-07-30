@@ -96,7 +96,10 @@ no test distinguishes the alternatives. `1 Ping` is absent from `ResponseFor`, s
 step 3 can never match it, and it is payload-shape `none`, so `Subscribe<T>` refuses
 it and step 4 can never match either. Deleting the `return` in the Ping branch, or
 moving that branch below the pending-request check, is therefore unobservable today.
-Both become load-bearing the moment `Subscribe`'s no-payload guard loosens.
+Each has its own trigger. The `return` becomes load-bearing the moment that
+no-payload guard loosens; the branch's position becomes load-bearing only if `Ping`
+were added to `ResponseFor` as a response value, which is a different change and
+would not follow from loosening the guard.
 
 A receive failure is treated as stream desynchronization: the session moves to
 `Faulted` and disconnects. Pending requests are failed on all three paths that end
