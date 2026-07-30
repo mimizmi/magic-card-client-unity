@@ -211,7 +211,16 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.Throws<OperationCanceledException>(
                 () => session.StopAsync(cancelled.Token).GetAwaiter().GetResult());
-            Assert.Throws<InvalidOperationException>(() => pending.GetAwaiter().GetResult());
+            // The message check is load-bearing, not decoration. A stranded waiter
+            // leaves this UniTask incomplete, and GetResult on an incomplete
+            // UniTask throws InvalidOperationException("Not yet completed, UniTask
+            // only allow to use await.") - so the bare Assert.Throws form is
+            // satisfied by the very symptom of the bug and passes against the
+            // unfixed StopAsync. Only the message distinguishes a waiter that was
+            // failed on purpose from one that was abandoned.
+            var failure = Assert.Throws<InvalidOperationException>(
+                () => pending.GetAwaiter().GetResult());
+            Assert.That(failure.Message, Does.Contain("stopped before the response"));
         }
 
         [Test]
