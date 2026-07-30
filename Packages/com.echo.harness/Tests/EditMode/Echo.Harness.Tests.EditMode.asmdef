@@ -23,7 +23,8 @@
   "precompiledReferences": [
     "R3.dll",
     "Microsoft.Bcl.TimeProvider.dll",
-    "Microsoft.Bcl.AsyncInterfaces.dll"
+    "Microsoft.Bcl.AsyncInterfaces.dll",
+    "Newtonsoft.Json.dll"
   ],
   "autoReferenced": false,
   "defineConstraints": [

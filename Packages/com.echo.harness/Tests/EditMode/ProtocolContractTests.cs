@@ -38,6 +38,37 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         [Test]
+        public void BinaryFrame_AcceptsAZeroLengthPayload()
+        {
+            // The server sends heartbeats as Send(MsgIDPing, nil), so a frame
+            // with no body at all has to be legal in both directions.
+            var encoded = BinaryFrameCodec.Encode(MessageId.Ping, Array.Empty<byte>());
+
+            Assert.That(encoded, Has.Length.EqualTo(
+                WireFrameSpec.LengthPrefixBytes + WireFrameSpec.MessageIdBytes));
+            Assert.That(encoded.Take(4).ToArray(), Is.EqualTo(new byte[] { 0, 0, 0, 0 }));
+
+            var decoded = BinaryFrameCodec.Decode(encoded);
+
+            Assert.That(decoded.MessageId, Is.EqualTo(MessageId.Ping));
+            Assert.That(decoded.Payload.Length, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void BinaryFrame_RoundTripsUnicodeSuitSymbols()
+        {
+            // Card suits are the Unicode symbols themselves, not ASCII codes,
+            // so the frame has to carry multi-byte UTF-8 through intact.
+            const string body = "{\"suit\":\"♥\",\"suits\":[\"♦\",\"♣\",\"♠\"]}";
+            var payload = Encoding.UTF8.GetBytes(body);
+
+            var decoded = BinaryFrameCodec.Decode(
+                BinaryFrameCodec.Encode(MessageId.CardPlayedEvent, payload));
+
+            Assert.That(Encoding.UTF8.GetString(decoded.Payload.ToArray()), Is.EqualTo(body));
+        }
+
+        [Test]
         public void DamageEvent_UsesAuthoritativeGoJsonNames()
         {
             var dto = new DamageEventDto

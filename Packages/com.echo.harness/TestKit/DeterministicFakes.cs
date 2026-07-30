@@ -10,14 +10,52 @@ namespace Echo.Harness.TestKit
     {
         private readonly Queue<TransportMessage> inbound = new Queue<TransportMessage>();
         private readonly List<TransportMessage> sent = new List<TransportMessage>();
+        private UniTaskCompletionSource<TransportMessage> pendingReceive;
+        private CancellationTokenRegistration pendingReceiveCancellation;
+        private Exception nextReceiveFailure;
+        private Exception nextSendFailure;
 
         public TransportState State { get; private set; } = TransportState.Disconnected;
 
         public IReadOnlyList<TransportMessage> Sent => sent;
 
+        /// <summary>
+        /// Queues an inbound message. When a receive is already awaiting, its
+        /// continuation runs synchronously from this call, so a test can assert
+        /// on the effects of the message as soon as this method returns.
+        /// </summary>
         public void EnqueueInbound(TransportMessage message)
         {
+            if (pendingReceive != null)
+            {
+                TakePendingReceive().TrySetResult(message);
+                return;
+            }
+
             inbound.Enqueue(message);
+        }
+
+        /// <summary>Makes the next receive fail, standing in for a desynchronized stream.</summary>
+        public void FailNextReceive(Exception failure)
+        {
+            if (failure == null)
+            {
+                throw new ArgumentNullException(nameof(failure));
+            }
+
+            if (pendingReceive != null)
+            {
+                TakePendingReceive().TrySetException(failure);
+                return;
+            }
+
+            nextReceiveFailure = failure;
+        }
+
+        /// <summary>Makes the next send fail, standing in for a closed socket.</summary>
+        public void FailNextSend(Exception failure)
+        {
+            nextSendFailure = failure ?? throw new ArgumentNullException(nameof(failure));
         }
 
         public UniTask ConnectAsync(CancellationToken cancellationToken)
@@ -33,6 +71,17 @@ namespace Echo.Harness.TestKit
         {
             cancellationToken.ThrowIfCancellationRequested();
             EnsureConnected();
+
+            // Synchronously, on purpose: that is the shape a real transport takes
+            // when it validates eagerly, and it is the shape a bare .Forget()
+            // cannot survive.
+            if (nextSendFailure != null)
+            {
+                var failure = nextSendFailure;
+                nextSendFailure = null;
+                throw failure;
+            }
+
             sent.Add(message);
             return UniTask.CompletedTask;
         }
@@ -41,19 +90,88 @@ namespace Echo.Harness.TestKit
         {
             cancellationToken.ThrowIfCancellationRequested();
             EnsureConnected();
-            if (inbound.Count == 0)
+
+            if (nextReceiveFailure != null)
             {
-                throw new InvalidOperationException("No inbound fixture is queued.");
+                var failure = nextReceiveFailure;
+                nextReceiveFailure = null;
+                return UniTask.FromException<TransportMessage>(failure);
             }
 
-            return UniTask.FromResult(inbound.Dequeue());
+            if (inbound.Count > 0)
+            {
+                return UniTask.FromResult(inbound.Dequeue());
+            }
+
+            if (pendingReceive != null)
+            {
+                throw new InvalidOperationException(
+                    "Only one receive may await this transport at a time.");
+            }
+
+            var waiter = new UniTaskCompletionSource<TransportMessage>();
+            pendingReceive = waiter;
+
+            // Cancelling the token has to unblock the receive on its own. Without
+            // this the fake would be less cancellable than the real transport it
+            // stands in for, so a pump that stops cleanly in a test could still
+            // hang in production.
+            var registration = cancellationToken.Register(
+                () =>
+                {
+                    if (ReferenceEquals(pendingReceive, waiter))
+                    {
+                        TakePendingReceive().TrySetCanceled(cancellationToken);
+                    }
+                });
+
+            if (ReferenceEquals(pendingReceive, waiter))
+            {
+                pendingReceiveCancellation = registration;
+            }
+            else
+            {
+                // The token was cancelled while registering, so the callback
+                // already ran inline and this registration is spent.
+                registration.Dispose();
+            }
+
+            return waiter.Task;
         }
 
         public UniTask DisconnectAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             State = TransportState.Disconnected;
+
+            if (pendingReceive != null)
+            {
+                TakePendingReceive().TrySetCanceled(cancellationToken);
+            }
+
             return UniTask.CompletedTask;
+        }
+
+        /// <summary>
+        /// Detaches the awaiting receive so the caller can complete it, and
+        /// releases its cancellation registration.
+        /// </summary>
+        private UniTaskCompletionSource<TransportMessage> TakePendingReceive()
+        {
+            var waiter = pendingReceive;
+
+            // Required, not merely tidy: the field must be cleared BEFORE the
+            // returned source is completed. Completing it resumes the awaiting
+            // pump inline, on this very stack, and that pump's next loop calls
+            // ReceiveAsync re-entrantly. Were the field still set, that call
+            // would trip the "only one receive" guard above, and UniTask would
+            // swallow the throw into PublishUnobservedTaskException — the pump
+            // would silently stop with a message that reads like a concurrency
+            // bug rather than the ordering bug it would actually be.
+            pendingReceive = null;
+            pendingReceiveCancellation.Dispose();
+            pendingReceiveCancellation = default;
+            return waiter;
         }
 
         private void EnsureConnected()

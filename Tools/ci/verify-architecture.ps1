@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot
+    [string]$ProjectRoot,
+    [string]$GoServerRoot = 'E:\code\_github\magic-card-server-golang'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +103,62 @@ $ExpectedRuntimeReferences = [ordered]@{
         'VContainer')
 }
 
+# The reference list alone does not enforce layer purity; these two flags do.
+#
+# noEngineReferences:true is what makes `using UnityEngine;` fail to compile in
+# Domain and Contracts. overrideReferences:true is what stops every
+# auto-referenced precompiled assembly in the project from being visible, so it
+# is what keeps `using R3;` (R3.dll under Assets/Packages) out of Contracts -- a
+# word this gate bans by source text in Domain and Application but cannot see in
+# Contracts, which has no source-text assertion at all. Without these
+# assertions, flipping either flag to make an illegal DTO field compile leaves
+# `references` at [] and the whole gate green.
+#
+# The values are deliberately NOT uniform: the three lower layers are engine
+# free while the three Unity-facing ones are not, and only Contracts overrides
+# its precompiled reference set. precompiledReferences is pinned alongside
+# overrideReferences because an override is only as strong as the list it
+# substitutes -- adding R3.dll there would reopen exactly the hole above.
+#
+# The [bool] casts mean a DELETED key is compared against Unity's own default
+# for that key (false), so the gate pins effective behaviour rather than JSON
+# shape.
+$ExpectedRuntimeAssemblyFlags = [ordered]@{
+    'Echo.Harness.Domain' = @{
+        NoEngineReferences = $true
+        OverrideReferences = $false
+        PrecompiledReferences = @()
+    }
+    'Echo.Harness.Contracts' = @{
+        NoEngineReferences = $true
+        OverrideReferences = $true
+        PrecompiledReferences = @('Newtonsoft.Json.dll')
+    }
+    'Echo.Harness.Application' = @{
+        NoEngineReferences = $true
+        OverrideReferences = $false
+        PrecompiledReferences = @()
+    }
+    'Echo.Harness.Infrastructure' = @{
+        NoEngineReferences = $false
+        OverrideReferences = $false
+        PrecompiledReferences = @()
+    }
+    'Echo.Harness.Presentation' = @{
+        NoEngineReferences = $false
+        OverrideReferences = $false
+        PrecompiledReferences = @()
+    }
+    'Echo.Harness.Bootstrap' = @{
+        NoEngineReferences = $false
+        OverrideReferences = $false
+        PrecompiledReferences = @()
+    }
+}
+
+Assert-SetEqual @($ExpectedRuntimeAssemblyFlags.Keys) @($ExpectedRuntimeReferences.Keys) `
+    'The two runtime assembly tables in this gate disagree about the assembly set.'
+
 $RuntimeAsmdefs = Get-ChildItem -LiteralPath (
     Join-Path $ProjectRoot 'Packages\com.echo.harness\Runtime') -Recurse -Filter '*.asmdef'
 Assert-Equal $RuntimeAsmdefs.Count $ExpectedRuntimeReferences.Count `
@@ -115,6 +172,18 @@ foreach ($AsmdefFile in $RuntimeAsmdefs) {
         "Assembly references changed for '$($Asmdef.name)'."
     Assert-True (-not (@($Asmdef.references) -contains 'Echo.Harness.TestKit')) `
         "Runtime assembly '$($Asmdef.name)' must not depend on TestKit."
+
+    $ExpectedFlags = $ExpectedRuntimeAssemblyFlags[$Asmdef.name]
+    Assert-Equal ([bool]$Asmdef.noEngineReferences) $ExpectedFlags.NoEngineReferences `
+        ("noEngineReferences changed for '$($Asmdef.name)'; that flag, not the " +
+            'reference list, is what decides whether the assembly can compile ' +
+            'against UnityEngine at all.')
+    Assert-Equal ([bool]$Asmdef.overrideReferences) $ExpectedFlags.OverrideReferences `
+        ("overrideReferences changed for '$($Asmdef.name)'; that flag is what " +
+            'stops every auto-referenced precompiled assembly in the project ' +
+            'from becoming usable from this assembly.')
+    Assert-SetEqual @($Asmdef.precompiledReferences) @($ExpectedFlags.PrecompiledReferences) `
+        "precompiledReferences changed for '$($Asmdef.name)'."
 }
 
 $DomainSources = Get-ChildItem -LiteralPath (
@@ -138,6 +207,7 @@ Assert-Equal $Contract.frame.length_prefix_bytes 4 'Protocol length-prefix width
 Assert-Equal $Contract.frame.message_id_bytes 2 'Protocol message-id width changed.'
 Assert-Equal $Contract.frame.length_includes_message_id $false `
     'The payload-length prefix must continue to exclude the message id.'
+Assert-Equal $Contract.frame.body_encoding 'utf-8-json' 'Protocol body encoding changed.'
 Assert-Equal $Contract.frame.max_payload_bytes 1048576 'Protocol payload cap changed.'
 Assert-Equal @($Contract.messages).Count 39 'Protocol fixture must contain 39 message ids.'
 Assert-Equal @($Contract.messages.id | Sort-Object -Unique).Count 39 `
@@ -161,6 +231,44 @@ Assert-SetEqual @($ActualNuGet.Keys) @($ExpectedNuGet.Keys) `
 foreach ($Package in $ExpectedNuGet.GetEnumerator()) {
     Assert-Equal $ActualNuGet[$Package.Key] $Package.Value `
         "NuGet package '$($Package.Key)' is not pinned."
+}
+
+# Protocol fixture drift gate.
+#
+# protocol.contract.json is generated by Tools/protocol from the authoritative
+# Go source. Regenerating and byte-comparing is what makes a server-side JSON
+# tag change fail the build instead of surfacing as a runtime bug months later.
+#
+# The gate skips with a warning when the Go source is absent. The hosted CI
+# runner in .github/workflows/unity-tests.yml runs this script without checking
+# out the sibling Go repository, and docs/verification-matrix.md documents that
+# boundary; a hard dependency would break the architecture job.
+#
+# The go TOOLCHAIN is guarded the same way, and for the same promise. With
+# $ErrorActionPreference = 'Stop' a missing `go` makes the invocation below throw
+# CommandNotFoundException -- an error that names neither this gate nor its
+# optional dependency. CI runs this script with no -GoServerRoot, so it resolves
+# the default path on a self-hosted Windows runner where the toolchain may be
+# absent even though the source is present. Both skips are warnings; when the
+# source AND the toolchain are both present the gate stays strict and real drift
+# still fails the build.
+$FixturePath = Join-Path $ProjectRoot 'Packages\com.echo.harness\Fixtures\protocol.contract.json'
+$GoProtocolSource = Join-Path $GoServerRoot 'internal\protocol'
+$GoToolchain = Get-Command -Name 'go' -CommandType Application -ErrorAction SilentlyContinue
+if (-not (Test-Path -LiteralPath $GoProtocolSource -PathType Container)) {
+    Write-Warning "Go protocol source not found at $GoProtocolSource; skipping the protocol fixture drift gate."
+} elseif ($null -eq $GoToolchain) {
+    Write-Warning 'The go toolchain was not found on PATH; skipping the protocol fixture drift gate.'
+} else {
+    Push-Location -LiteralPath (Join-Path $ProjectRoot 'Tools\protocol')
+    try {
+        & go run . -source $GoProtocolSource -check $FixturePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "The protocol fixture no longer matches $GoProtocolSource. Regenerate it with Tools/protocol -out."
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 Write-Host 'Architecture verification passed.'

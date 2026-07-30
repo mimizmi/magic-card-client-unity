@@ -1,0 +1,307 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using Echo.Harness.Application;
+using Echo.Harness.Contracts;
+using Echo.Harness.TestKit;
+using NUnit.Framework;
+using static Echo.Harness.Tests.EditMode.ProtocolTestFrames;
+
+namespace Echo.Harness.Tests.EditMode
+{
+    public sealed class ProtocolSessionDispatchTests
+    {
+        private static ProtocolSession StartedSession(FakeTransport transport)
+        {
+            var session = new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            session.StartAsync(default).GetAwaiter().GetResult();
+            return session;
+        }
+
+        [Test]
+        public void Subscribe_DeliversTheTypedPayload()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            GameOverEventDto received = null;
+            session.Subscribe<GameOverEventDto>(MessageId.GameOverEvent, dto => received = dto);
+
+            transport.EnqueueInbound(Frame(
+                MessageId.GameOverEvent, "{\"winner_seat\":1,\"reason\":\"surrender\"}"));
+
+            // Asserting the field values, not just non-null: a handler wired to
+            // the wrong id would still receive a default-constructed instance.
+            Assert.That(received, Is.Not.Null);
+            Assert.That(received.WinnerSeat, Is.EqualTo(1));
+            Assert.That(received.Reason, Is.EqualTo("surrender"));
+        }
+
+        [Test]
+        public void Subscribe_RejectsATypeThatDoesNotMatchTheContract()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            // Caught at subscription time on purpose. Deferring it to dispatch
+            // would surface the mistake when the message first arrives, which for
+            // a damage event could be ten minutes into a match.
+            Assert.Throws<ArgumentException>(
+                () => session.Subscribe<LoginResponseDto>(MessageId.DamageEvent, _ => { }));
+        }
+
+        /// <summary>
+        /// These four ids carry no body at all, so ProtocolCodec.Decode reports
+        /// success with a null payload. Rejecting them at subscription time is
+        /// the only thing standing between that null and a typed cast in
+        /// DeliverToSubscribers, which is why the assertion below pins the
+        /// message: an implementation that happened to throw from the
+        /// type-comparison branch instead would satisfy a bare Throws and leave
+        /// the guarantee resting on an accident.
+        /// </summary>
+        [TestCase(MessageId.Ping)]
+        [TestCase(MessageId.Pong)]
+        [TestCase(MessageId.LeaveQueueRequest)]
+        [TestCase(MessageId.RokkaActivateRequest)]
+        public void Subscribe_RejectsAMessageThatCarriesNoPayload(MessageId messageId)
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.Subscribe<GameOverEventDto>(messageId, _ => { }));
+
+            Assert.That(
+                exception.Message,
+                Does.Contain("carries no payload and cannot be subscribed to"),
+                "The no-payload guard must be what rejected this, not the type comparison.");
+        }
+
+        [Test]
+        public void Subscribe_StopsDeliveringAfterDisposal()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var count = 0;
+            var subscription = session.Subscribe<GameOverEventDto>(
+                MessageId.GameOverEvent, _ => count++);
+
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+            subscription.Dispose();
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+
+            Assert.That(count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void Dispatch_IsolatesASubscriberThatThrows()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            var secondSubscriberRan = false;
+            session.Subscribe<GameOverEventDto>(
+                MessageId.GameOverEvent, _ => throw new InvalidOperationException("boom"));
+            session.Subscribe<GameOverEventDto>(
+                MessageId.GameOverEvent, _ => secondSubscriberRan = true);
+
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.SubscriberFailure));
+            Assert.That(secondSubscriberRan, Is.True,
+                "One view model's null reference must not silence the others.");
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+        }
+
+        [Test]
+        public void Dispatch_TreatsAMessageWithNoSubscribersAsNormal()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+
+            transport.EnqueueInbound(Frame(MessageId.TurnTimerEvent, "{}"));
+
+            Assert.That(faults, Is.Empty);
+        }
+
+        /// <summary>
+        /// A subscriber that stops the session runs while the pump is executing,
+        /// not parked on a receive, so there is no pending read for the disconnect
+        /// to cancel. The pump's only exit on this path is its loop condition; if
+        /// stopping failed to cancel the pump token, the next iteration would call
+        /// ReceiveAsync on a disconnected transport, trip its connected guard, and
+        /// land in the stream-fault path with a TransportFailure nobody caused.
+        /// </summary>
+        [Test]
+        public void Dispatch_LetsASubscriberStopTheSessionWithoutFaultingThePump()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            session.Subscribe<GameOverEventDto>(
+                MessageId.GameOverEvent,
+                _ => session.StopAsync(default).GetAwaiter().GetResult());
+
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+            Assert.That(transport.State, Is.EqualTo(TransportState.Disconnected));
+            Assert.That(faults, Is.Empty,
+                "Stopping from inside a subscriber is an orderly shutdown, not a stream failure.");
+        }
+
+        [Test]
+        public void SendAsync_WritesTheEncodedFrameToTheTransport()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            session.SendAsync(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "echo" },
+                default).GetAwaiter().GetResult();
+
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0].MessageId, Is.EqualTo(MessageId.LoginRequest));
+            Assert.That(
+                Encoding.UTF8.GetString(transport.Sent[0].Payload),
+                Is.EqualTo("{\"player_name\":\"echo\"}"));
+        }
+
+        [Test]
+        public void SendAsync_RejectsAPayloadThatDoesNotMatchTheMessageId()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            Assert.Throws<ArgumentException>(
+                () => session.SendAsync(
+                    MessageId.PlayCardRequest,
+                    new LoginRequestDto(),
+                    default).GetAwaiter().GetResult());
+        }
+
+        /// <summary>
+        /// The other half of the constraint that
+        /// SendAsync_AcceptsANullPayloadForAMessageThatCarriesNone covers. Without
+        /// this branch a forgotten payload ships as an empty frame and the server
+        /// sees a login with no name rather than a client-side error.
+        /// </summary>
+        [Test]
+        public void SendAsync_RejectsANullPayloadForAMessageThatRequiresOne()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.SendAsync(
+                    MessageId.LoginRequest, null, default).GetAwaiter().GetResult());
+
+            Assert.That(exception.Message, Does.Contain("requires a LoginRequestDto payload"));
+            Assert.That(transport.Sent, Is.Empty, "A rejected send must never reach the wire.");
+        }
+
+        [Test]
+        public void SendAsync_RejectsAPayloadForAMessageThatCarriesNone()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            var exception = Assert.Throws<ArgumentException>(
+                () => session.SendAsync(
+                    MessageId.Pong,
+                    new LoginRequestDto(),
+                    default).GetAwaiter().GetResult());
+
+            Assert.That(exception.Message, Does.Contain("Pong carries no payload"));
+            Assert.That(transport.Sent, Is.Empty, "A rejected send must never reach the wire.");
+        }
+
+        [Test]
+        public void SendAsync_AcceptsANullPayloadForAMessageThatCarriesNone()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            session.SendAsync(MessageId.Pong, null, default).GetAwaiter().GetResult();
+
+            Assert.That(transport.Sent[0].Payload, Is.Empty);
+        }
+
+        [Test]
+        public void SendAsync_RequiresAConnectedSession()
+        {
+            var transport = new FakeTransport();
+            using var session = new ProtocolSession(
+                transport, new ManualClock(DateTimeOffset.UnixEpoch));
+
+            Assert.Throws<InvalidOperationException>(
+                () => session.SendAsync(MessageId.Pong, null, default).GetAwaiter().GetResult());
+        }
+
+        [Test]
+        public void Heartbeat_AnswersAnInboundPingWithPong()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0].MessageId, Is.EqualTo(MessageId.Pong));
+            Assert.That(transport.Sent[0].Payload, Is.Empty,
+                "The Go server sends heartbeats with a nil body; the reply matches.");
+        }
+
+        [Test]
+        public void Heartbeat_DoesNotSurfaceToFaultHandlers()
+        {
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(faults, Is.Empty);
+        }
+
+        [Test]
+        public void Heartbeat_SurvivesASendFailureWithoutKillingThePump()
+        {
+            // Both of the previous two tests pass even with a bare
+            // SendAsync(...).Forget(), because FakeTransport's send succeeds
+            // synchronously. This is the test that actually covers the hazard.
+            var transport = new FakeTransport();
+            using var session = StartedSession(transport);
+            var faults = new List<SessionFault>();
+            session.SubscribeToFaults(faults.Add);
+            transport.FailNextSend(new IOException("socket closed"));
+
+            transport.EnqueueInbound(Bodyless(MessageId.Ping));
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                "A failed heartbeat reply must not kill the pump.");
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.TransportFailure));
+
+            // The pump must still be processing after the failed reply, and that is
+            // observed by delivery rather than by State. A pump killed through
+            // Dispatch unwinds into the unobserved-exception handler without ever
+            // touching State, so State still reads Connected for a dead pump and
+            // cannot tell the two apart. Only a later message actually arriving can.
+            var delivered = false;
+            session.Subscribe<GameOverEventDto>(MessageId.GameOverEvent, _ => delivered = true);
+            transport.EnqueueInbound(Frame(MessageId.GameOverEvent, "{}"));
+
+            Assert.That(delivered, Is.True,
+                "The pump must still be delivering messages after a failed heartbeat reply.");
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+        }
+    }
+}
