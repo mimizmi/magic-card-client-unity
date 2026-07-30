@@ -21,6 +21,14 @@ Go repository baseline.
 | Go baseline | `go test ./...` | existing authoritative server remains green | console |
 | Aggregate | `verify.ps1` | all gates above | `Artifacts/verification-summary.md` |
 
+The architecture gate's source-text assertions are narrower than "the whole runtime",
+and reasoning about them as if they were uniform has misled reviews. They cover
+`Runtime/Domain` and `Runtime/Application` only, and the two banned-word lists differ:
+`Cysharp` is forbidden in `Domain` and permitted in `Application`, which is what keeps
+the UniTask async boundary legal there. `Runtime/Contracts` has no source-text
+assertion at all — it is constrained by its asmdef reference set, which the gate pins
+to zero references.
+
 ## Test layers
 
 | Layer | Current Harness coverage | Explicitly not covered yet |

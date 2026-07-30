@@ -44,7 +44,7 @@ deliverable.
   reaches `Disconnected`, and lets `StartAsync` succeed again, so restart-after-fault
   exists today undesigned and untested.
 - [ ] Make `ProtocolSession` safe for the second thread a real socket introduces.
-  `pendingRequests` is a plain `Dictionary` and `State` a plain field, both written
+  `pendingRequests` is a plain `Dictionary` and `State` an ordinary auto-property, both written
   from the pump's stack and from the `CancelAfter` timer's thread-pool thread, where a
   concurrent resize can misroute a response to subscribers; a caller awaiting
   `RequestAsync` also resumes off the main thread after a timeout. Check the deadline
@@ -65,20 +65,39 @@ deliverable.
 - [ ] Add a transport double whose `SendAsync` can park, and pin the two residuals
   that need one: the identity-checked gate removal in `RequestAsync`'s `finally`, and
   a synchronous `try`/`catch` heartbeat reply, which loses a `Pong` when the send
-  faults after returning.
+  faults after returning. Cover `FakeTransport.FailNextSend` itself while there — it
+  has no fake-level test at all, so its null guard and its one-shot semantics are both
+  unpinned; a second `Bodyless(Ping)` in the third heartbeat test, asserting one `Pong`
+  and faults still at 1, closes that in one line.
 - [ ] Give a single-flight gate rejection and a stale echo distinguishable exception
   types. Both throw `InvalidOperationException` (`ProtocolSession.cs:165` and `:224`),
   so a probe loop firing every 5 s against a 10 s deadline cannot tell "a request is
   already in flight" from a genuine correlation mismatch without matching on the
   message text.
-- [ ] Re-verify `Dispatch`'s completion-safety comment on any UniTask upgrade. It
-  quotes the private `RunTask` body of 2.5.11 verbatim, and that quotation is the
-  entire argument for why a resumed continuation cannot kill the receive pump from
-  outside its `try`. A version bump can invalidate it silently, with the suite green.
+- [ ] Re-verify `Dispatch`'s completion-safety comment on any UniTask upgrade, and do
+  not treat it as a general guarantee. It quotes the private `RunTask` body of 2.5.11
+  verbatim, so a version bump can invalidate the argument silently with the suite
+  green, and the argument is narrower than it reads: `AttachExternalCancellation`
+  returns no wrapper when the task is already completed, and a throwing caller
+  continuation is contained but never reported, because `TrySetException` on an
+  already-completed core returns `false`.
+- [ ] Publish the root-cause receive failure before the disconnect failure in
+  `FaultTheStreamAsync` (`ProtocolSession.cs:456-463`). A consumer that reads the first
+  `TransportFailure` — the natural thing to do — currently gets the symptom rather than
+  the cause.
+- [ ] Resolve the contradiction over `SessionFault.MessageId` for `TransportFailure`:
+  pick one meaning and make the design and the code agree. The design calls the field
+  "meaningless for `TransportFailure`" while the heartbeat path populates it with
+  `MessageId.Pong` (`ProtocolSession.cs:391-394`) and the stream fault passes `default`
+  (`:458`, `:463`). `Kind` is identical on all three, so that field is the only thing
+  separating "the heartbeat write failed, the connection is probably still usable" from
+  "the stream desynchronized", and a maintainer trusting the design would delete it.
 - [ ] Settle one assertion convention for `SessionFault` contents and apply it across
-  the session. Only `Kind` is asserted anywhere, leaving the heartbeat fault's
-  `MessageId` and `Diagnostic` unpinned, and with them the correlation-mismatch
-  diagnostic's operand order — the only direction information in that message.
+  the session. `Kind` is the only field asserted on the faults the session generates
+  itself, the unknown-message-id fault's `MessageId` excepted
+  (`ProtocolSessionLifecycleTests.cs:65`), so the heartbeat fault's `MessageId` and
+  `Diagnostic` are unpinned, and with them the correlation-mismatch diagnostic's
+  operand order — the only direction information in that message.
 - [ ] Add disposable-server golden integration tests.
 - [ ] Define app/session/scene VContainer lifetime scopes.
 - [ ] Implement Addressables catalog environments, build profiles, release

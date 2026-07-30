@@ -91,6 +91,13 @@ Because the protocol carries no correlation identifier, `RequestAsync` waits for
 the next message of the paired id from `ProtocolMessageMap.ResponseFor`, and a
 second in-flight request for the same response id throws rather than queueing.
 
+That order is designed but not currently enforced by the code that expresses it, and
+no test distinguishes the alternatives. `1 Ping` is absent from `ResponseFor`, so
+step 3 can never match it, and it is payload-shape `none`, so `Subscribe<T>` refuses
+it and step 4 can never match either. Deleting the `return` in the Ping branch, or
+moving that branch below the pending-request check, is therefore unobservable today.
+Both become load-bearing the moment `Subscribe`'s no-payload guard loosens.
+
 A receive failure is treated as stream desynchronization: the session moves to
 `Faulted` and disconnects. Pending requests are failed on all three paths that end
 the pump — a stream fault, `StopAsync`, and `Dispose` — because once the pump is

@@ -363,6 +363,14 @@ namespace Echo.Harness.Application
                 // AttachExternalCancellation and that guarantee leaves with it:
                 // a throwing continuation would then kill the pump with the
                 // connection still open.
+                //
+                // Two limits, so the reasoning is not reused more widely than it
+                // holds. AttachExternalCancellation returns the bare task with no
+                // wrapper when it is already completed - reachable while this
+                // frame is parked in its send - though nothing is awaiting on
+                // that path either, so this call resumes no frame. And a throwing
+                // continuation is contained but not reported: TrySetException on
+                // an already-completed core returns false and drops it silently.
                 completion.TrySetResult(result.Payload);
                 return;
             }
