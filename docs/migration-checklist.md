@@ -14,6 +14,8 @@ deliverable.
   `Tools/protocol` and gated against it by byte comparison.
 - [x] Typed DTOs for all 39 messages and the five nested view types, asserted against
   the generated fixture by `ProtocolDtoContractTests`.
+- [x] Message codec and session routing over `ITransport`, driven end to end by
+  deterministic fakes.
 - [x] Deterministic transport/content/Lua/time fakes.
 - [x] EditMode, PlayMode, static, local aggregate, and CI entry points.
 - [ ] Assign real CODEOWNERS teams in `.github/CODEOWNERS`.
@@ -24,6 +26,50 @@ deliverable.
 - [ ] Introduce protocol version/capability negotiation with the Go server.
 - [ ] Implement a cancellable TCP transport with partial-read framing,
   backpressure, reconnect policy, and structured telemetry.
+- [ ] Serialize writes in the real transport, and make `DisconnectAsync` idempotent.
+  `ITransport.SendAsync` now documents the concurrency requirement: the session
+  answers a heartbeat from the receive pump, so a caller's send and a `Pong` can be
+  in flight together, and a length prefix interleaved with another body
+  desynchronizes the stream fatally.
+- [ ] Wrap `ProtocolSession.StopAsync` in `try`/`finally`. `FailPendingRequests`
+  currently sits after the `DisconnectAsync` await, so a throwing disconnect — or an
+  already-cancelled token handed to `StopAsync`, a realistic shutdown pattern —
+  strands every waiter and leaves `State == Connected` over a dead pump.
+- [ ] Give `ProtocolSession.Dispose` a defined transport story. It cancels the pump
+  but never disconnects and cannot await, so a real socket stays open until
+  finalization and the server-side session lingers until its own timeout. Choose
+  between a fire-and-forget disconnect and a documented "stop before disposing"
+  contract.
+- [ ] Decide what `StopAsync` from `Faulted` means. It disconnects a second time,
+  reaches `Disconnected`, and lets `StartAsync` succeed again, so restart-after-fault
+  exists today undesigned and untested.
+- [ ] Make `ProtocolSession` safe for the second thread a real socket introduces.
+  `pendingRequests` is a plain `Dictionary` and `State` a plain field, both written
+  from the pump's stack and from the `CancelAfter` timer's thread-pool thread, where a
+  concurrent resize can misroute a response to subscribers; a caller awaiting
+  `RequestAsync` also resumes off the main thread after a timeout. Check the deadline
+  on the pump or hop explicitly.
+- [ ] Close `Dispatch` sitting outside the receive pump's `try`. `State` can read
+  `Connected` for a pump that a `Dispatch`-internal exception already killed, and each
+  callee is individually responsible for not throwing, so a future branch inherits no
+  protection. Either wrap the `Dispatch(message)` call alone in a `try` that publishes
+  a fault and continues, or document the invariant on `Dispatch`.
+- [ ] Answer a requester whose response payload fails to decode. The decode-failure
+  branch runs before the pending-request check, so a truncated response is dropped
+  with its fault on the fault channel while the requester stalls its whole timeout —
+  a hardcoded 10 s for `ProbeRoundTripAsync`.
+- [ ] Rename `ProtocolSession.DefaultRequestTimeout` to what it actually is, the
+  round-trip probe's deadline. `RequestAsync` has no overload that defaults a timeout,
+  the constant is unreachable from `IProtocolSession`, and no test pins it, so raising
+  it for a slow login would silently give every latency probe the longer deadline.
+- [ ] Add a transport double whose `SendAsync` can park, and pin the two residuals
+  that need one: the identity-checked gate removal in `RequestAsync`'s `finally`, and
+  a synchronous `try`/`catch` heartbeat reply, which loses a `Pong` when the send
+  faults after returning.
+- [ ] Settle one assertion convention for `SessionFault` contents and apply it across
+  the session. Only `Kind` is asserted anywhere, leaving the heartbeat fault's
+  `MessageId` and `Diagnostic` unpinned, and with them the correlation-mismatch
+  diagnostic's operand order — the only direction information in that message.
 - [ ] Add disposable-server golden integration tests.
 - [ ] Define app/session/scene VContainer lifetime scopes.
 - [ ] Implement Addressables catalog environments, build profiles, release

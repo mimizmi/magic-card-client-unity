@@ -76,6 +76,29 @@ rules there are load-bearing for hidden information and are covered by
   contract; adding a hand property would invite consumers to expect data that the
   server never sends.
 
+## Session layer
+
+`ProtocolSession` (`Runtime/Application/Session/`) owns one receive pump over
+`ITransport` and routes each decoded message to exactly one destination, in this
+order:
+
+1. decode failure — publish a `SessionFault`, drop the message, stay connected
+2. `1 Ping` — reply `2 Pong`, do not dispatch
+3. a request is awaiting this id — complete it, do not dispatch
+4. otherwise — deliver to `Subscribe<T>` handlers
+
+Because the protocol carries no correlation identifier, `RequestAsync` waits for
+the next message of the paired id from `ProtocolMessageMap.ResponseFor`, and a
+second in-flight request for the same response id throws rather than queueing.
+
+A receive failure is treated as stream desynchronization: the session moves to
+`Faulted` and disconnects. Pending requests are failed on all three paths that end
+the pump — a stream fault, `StopAsync`, and `Dispose` — because once the pump is
+gone nothing can ever answer a waiter, and leaving one pending would make it wait
+out its full timeout and then report a network failure that never happened.
+Per-message errors never disconnect, because a server adding a message is normal
+version drift.
+
 ## Known migration drift
 
 | Event | Go JSON contract | Legacy Godot expectation | Migration rule |

@@ -26,7 +26,7 @@ Go repository baseline.
 | Layer | Current Harness coverage | Explicitly not covered yet |
 |---|---|---|
 | Static | package/version pins, dependency direction, forbidden references, fixture shape, fixture-vs-Go drift | API compatibility across upgrades |
-| EditMode | frame codec, message IDs, all 39 typed DTOs driven from the fixture, nullable/omitempty behavior, nested view tree, fakes, DI, third-party type resolution, optional xLua probe | real TCP, catalogs, Lua VM, gameplay |
+| EditMode | frame codec, message IDs, all 39 typed DTOs driven from the fixture, nullable/omitempty behavior, nested view tree, protocol session routing and correlation, fakes, DI, third-party type resolution, optional xLua probe | real TCP, catalogs, Lua VM, gameplay, heartbeat timing under real latency |
 | PlayMode | UniTask player-loop yield, R3 disposal, UI Toolkit data source | scenes, final UI, assets, device input |
 | Go | existing repository unit/integration baseline | Unity↔Go end-to-end process test |
 | Performance | framework installed | budgets and measurements |

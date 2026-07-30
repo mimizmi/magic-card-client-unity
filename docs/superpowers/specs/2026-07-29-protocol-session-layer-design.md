@@ -271,7 +271,13 @@ All EditMode, driven by `FakeTransport` and `ManualClock`. Coverage:
 - `SendAsync` with a mismatched payload type throws
 - a throwing subscriber produces a `SessionFault` and the pump keeps running
 - `ProbeRoundTripAsync` returns the exact interval the `ManualClock` advanced
-- a mismatched echoed `ts` publishes `CorrelationMismatch` and throws
+- the echoed `ts` is checked for equality, and a mismatch in **either** direction
+  publishes `CorrelationMismatch` and throws. Both directions are reachable, so a
+  directional comparison is not enough: the server re-sends the request bytes
+  verbatim, so a stale reply carries whatever `ts` this client wrote, and `IClock`
+  promises no monotonicity — after a backwards wall-clock step the stale echo carries
+  the *larger* value. Testing only `response.Ts > request.Ts` would let every
+  ordinary stale reply through and return a wrong-but-plausible latency
 - `StartAsync` twice throws; `SendAsync` before `StartAsync` throws; `StopAsync`
   from `Disconnected` is a no-op
 - a receive failure sets `Faulted`, disconnects, and fails pending requests
