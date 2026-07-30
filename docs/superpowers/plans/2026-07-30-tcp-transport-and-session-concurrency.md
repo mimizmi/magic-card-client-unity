@@ -450,29 +450,86 @@ Then hop the other path that resumes off-context. In `RequestAsync` (`:185-189`)
                 }
 ```
 
-The `when` clause guarantees `cancellationToken` is not cancelled here, so the hop cannot itself throw a cancellation and swallow the timeout.
+The `when` clause narrows the window in which the hop could itself throw a cancellation and swallow the timeout.
+
+> **Corrected 2026-07-31, after Task 2's review.** This step originally said the
+> `when` clause *guarantees* `cancellationToken` is not cancelled here. It does
+> not: the filter evaluates `!cancellationToken.IsCancellationRequested`, then
+> the handler body calls `SwitchToSessionContextAsync(cancellationToken)`, which
+> throws if cancellation arrives in the gap. That is a TOCTOU, and benign in
+> effect (the caller did cancel). The sharper residual, deferred as a Task 2
+> minor and carried into Task 8: if the hop throws for a **non**-cancellation
+> reason — which is exactly what a real player-loop scheduler does when no
+> player loop is running — the `TimeoutException` is replaced, the outer
+> `finally` still removes the gate entry while running off-context (the very
+> mutation this hop exists to prevent), and no `SessionFault` is published. The
+> pump path faults the stream on a hop failure; this path silently degrades to
+> pre-hop behaviour. Task 8 must revisit it.
 
 - [ ] **Step 5: Narrow the borrowed-guarantee comment**
+
+> **Corrected 2026-07-31, after Task 2's review.** The text this step originally
+> mandated was wrong, and it shipped before the review caught it (fixed in
+> `a7da815`). It claimed a throwing requester continuation "is caught there
+> [the pump's try], published as a DispatchFailure, and the pump continues."
+> It is not. `RequestAsync` awaits through `AttachExternalCancellation`, whose
+> runner wraps the inline `TrySetResult`, so the throw unwinds into *that* try
+> and `TrySetException` drops it on the already-completed core. The pump's try
+> never sees it. The original step also deleted the pre-existing paragraph that
+> documented this correctly. Widening the pump's try makes the safety local for
+> *future branches of Dispatch*, not for the requester-continuation path.
+> The block below is the text that actually shipped.
 
 In `Dispatch`, replace the block at `:354-373` (from "The safety of this line is borrowed" through "returns false and drops it silently.") with:
 
 ```csharp
-                // This line's safety is now local. The Dispatch call sits inside
-                // the pump's try, so a requester continuation that resumes here
-                // and throws is caught there, published as a DispatchFailure, and
-                // the pump continues. Before that try existed the safety was
-                // borrowed from AttachExternalCancellation's own catch, which meant
-                // changing the timeout mechanism could remove it silently.
+                // TrySetResult resumes the requester's continuation inline, on
+                // this stack, so the requester's finally has run - and its gate
+                // entry is gone - before this method returns. That is what the
+                // paragraph above relies on.
                 //
-                // Still true and still worth knowing: TrySetResult resumes the
-                // requester's continuation inline, on this stack, so the
-                // requester's finally runs before this method returns. That is why
-                // the entry is not removed here - see the comment above.
+                // What this line does not get is cover from the pump's try, and
+                // the difference matters to anyone changing the timeout
+                // mechanism. A requester continuation that resumes from here and
+                // throws is swallowed by UniTask before it can reach Dispatch's
+                // caller. Today that happens in AttachExternalCancellation's
+                // runner body,
+                //     try { core.TrySetResult(await task); }
+                //     catch (Exception ex) { core.TrySetException(ex); }
+                // (UniTaskExtensions.cs:314-328), where TrySetException on an
+                // already-completed core returns false and drops the exception
+                // with no report at all (UniTaskCompletionSource.cs:150-173).
+                // Dropping AttachExternalCancellation would not hand this line to
+                // the pump's try either: TrySignalCompletion invokes the
+                // continuation inside its own catch and routes a throw to
+                // UniTaskScheduler.PublishUnobservedTaskException
+                // (UniTaskCompletionSource.cs:910-917).
+                //
+                // So a broken requester continuation is contained but never
+                // reported to this session - the pump survives, and no
+                // SessionFault is published for it. That is a known diagnostic
+                // hole rather than a guarantee. The pump's try is insurance for
+                // future branches of this method; it is not what protects this
+                // line.
 ```
 
 - [ ] **Step 6: Update the two docs that cite the old shape**
 
-`ReplyToHeartbeatAsync`'s doc (`:381-390`) opens "Dispatch runs outside the pump's try" and `DeliverToSubscribers`' doc (`:406-412`) says "Dispatch runs on the pump's stack outside its try block". Both are now false. Replace each of those clauses with: "Dispatch now runs inside the pump's try, so an escaping exception costs one message rather than the pump; this guard is kept because it reports the failure against the right message id and keeps one broken subscriber from silencing the rest." Leave the remainder of each doc unchanged.
+`ReplyToHeartbeatAsync`'s doc (`:381-390`) opens "Dispatch runs outside the pump's try" and `DeliverToSubscribers`' doc (`:406-412`) says "Dispatch runs on the pump's stack outside its try block". Both are now false. Replace each of those clauses with the shared opening — "Dispatch now runs inside the pump's try, so an escaping exception costs one message rather than the pump" — then give each doc **only** the justification that actually holds there:
+
+- `ReplyToHeartbeatAsync`: the guard is kept because it reports the failure against the right message id. Without it a heartbeat send failure would surface as a `DispatchFailure` against the inbound `Ping` instead of a `TransportFailure` against the `Pong` that actually failed. Also drop ", killing the pump on an open connection" from this doc — it is no longer true once `Dispatch` sits inside the try.
+- `DeliverToSubscribers`: the guard is kept for the `SubscriberFailure` grading and per-handler isolation, so one broken subscriber cannot silence the rest.
+
+Leave the remainder of each doc unchanged.
+
+> **Corrected 2026-07-31, after Task 2's review.** This step originally mandated
+> one sentence for both docs, ending "...because it reports the failure against
+> the right message id and keeps one broken subscriber from silencing the rest."
+> Half of it is wrong in each place: there are no subscribers anywhere on the
+> heartbeat-reply path, and on the subscriber path the message id is
+> `result.MessageId` either way, so the attribution clause is vacuous there.
+> Applying it literally also produced ungrammatical prose in one doc. Split as
+> above; shipped in `a7da815`.
 
 - [ ] **Step 7: Run the suite**
 
