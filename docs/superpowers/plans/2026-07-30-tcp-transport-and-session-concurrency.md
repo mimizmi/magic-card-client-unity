@@ -1223,7 +1223,7 @@ These arrive together because a streaming reader cannot be tested without byte-l
 - Produces:
   - `Echo.Harness.Infrastructure.TcpTransportOptions` with `string Host`, `int Port`, `TimeSpan ReadIdleTimeout` (default 45 s), `int SendBudgetPerSecond` (default 30).
   - `Echo.Harness.Infrastructure.TcpTransport : ITransport, IDisposable`, constructor `TcpTransport(TcpTransportOptions options, IClock clock)`.
-  - `Echo.Harness.TestKit.LoopbackProtocolServer : IDisposable` with `int Port`, `UniTask AcceptAsync(TimeSpan)`, `void SendFrame(MessageId, string jsonBody)`, `void SendBytes(byte[])`, `void SendRawHeader(int declaredLength, MessageId)`, `UniTask WaitForFramesAsync(int, TimeSpan)`, `IReadOnlyList<DecodedFrame> Received`, `void CloseConnection()`.
+  - `Echo.Harness.TestKit.LoopbackProtocolServer : IDisposable` with `int Port`, `UniTask AcceptAsync(TimeSpan)`, `void SendFrame(MessageId, string jsonBody)`, `void SendBytes(byte[])`, `void SendRawHeader(int declaredLength, MessageId)`, `UniTask WaitForFramesAsync(int, TimeSpan)`, `IReadOnlyList<DecodedFrame> Received`, `Exception ReadFailure`, `void CloseConnection()`.
 
 - [ ] **Step 1: Write the loopback server**
 
@@ -1261,6 +1261,7 @@ namespace Echo.Harness.TestKit
         private NetworkStream stream;
         private Thread readerThread;
         private volatile bool disposed;
+        private volatile Exception readFailure;
 
         public LoopbackProtocolServer()
         {
@@ -1270,6 +1271,12 @@ namespace Echo.Harness.TestKit
         }
 
         public int Port { get; }
+
+        /// <summary>
+        /// Non-null once the read loop stopped on something other than a normal
+        /// close. Interleaved client writes land here as an InvalidDataException.
+        /// </summary>
+        public Exception ReadFailure => readFailure;
 
         public IReadOnlyList<DecodedFrame> Received
         {
@@ -1353,6 +1360,17 @@ namespace Echo.Harness.TestKit
             var deadline = DateTime.UtcNow + timeout;
             while (DateTime.UtcNow < deadline)
             {
+                // Surfaced here, on the caller's thread, because this is the only
+                // place a test is waiting. An interleaved write makes the read loop
+                // raise InvalidDataException, and reporting it as a timeout instead
+                // would name the symptom rather than the cause.
+                var failure = readFailure;
+                if (failure != null)
+                {
+                    throw new InvalidDataException(
+                        "The loopback server stopped reading: " + failure.Message, failure);
+                }
+
                 lock (receivedGate)
                 {
                     if (received.Count >= count)
@@ -1444,6 +1462,16 @@ namespace Echo.Harness.TestKit
             catch (ObjectDisposedException)
             {
                 // Disposed mid-read.
+            }
+            catch (Exception failure)
+            {
+                // Recorded, never allowed to escape. An unhandled exception on a
+                // background thread is invisible where a test can act on it - it
+                // either takes the process down or is swallowed by Unity's handler -
+                // and the interleaving detected above is the entire signal the
+                // write-serialization test depends on. WaitForFramesAsync surfaces
+                // it on the calling thread.
+                readFailure = failure;
             }
         }
 
@@ -2350,7 +2378,9 @@ Expected: `EditMode: 133/133 passed.`
 
 - [ ] **Step 7: Mutation-verify the serialization test**
 
-Temporarily remove `await sendGate.WaitAsync(...)` and the `finally`'s `Release()`, then run `ConcurrentSendsArriveAsWholeFrames`. It must fail — either the loopback reader raises `InvalidDataException` about interleaving, or the frame count and payload lengths disagree. Restore the gate. A serialization test that passes without the gate proves nothing, and this test is the only evidence for the whole write path.
+Temporarily remove `await sendGate.WaitAsync(...)` and the `finally`'s `Release()`, then run `ConcurrentSendsArriveAsWholeFrames`. It must fail — `WaitForFramesAsync` raises the loopback reader's `InvalidDataException` about interleaving, or the frame count and payload lengths disagree. Restore the gate. A serialization test that passes without the gate proves nothing, and this test is the only evidence for the whole write path.
+
+Interleaving is not guaranteed on every run without the gate — two writes can happen to complete in order. If the mutated run passes, raise the concurrent sender count and the body size and try again; a 20-sender run with a ~1 KiB body interleaves reliably. Do not conclude the gate is unnecessary from one lucky pass.
 
 - [ ] **Step 8: Commit**
 
