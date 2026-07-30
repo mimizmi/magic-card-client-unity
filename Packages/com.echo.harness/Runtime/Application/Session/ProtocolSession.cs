@@ -379,17 +379,34 @@ namespace Echo.Harness.Application
                 // whenever the frame is parked in its send rather than at its
                 // await, which is what a real socket makes reachable.
                 //
-                // This line's safety is now local. The Dispatch call sits inside
-                // the pump's try, so a requester continuation that resumes here
-                // and throws is caught there, published as a DispatchFailure, and
-                // the pump continues. Before that try existed the safety was
-                // borrowed from AttachExternalCancellation's own catch, which meant
-                // changing the timeout mechanism could remove it silently.
+                // TrySetResult resumes the requester's continuation inline, on
+                // this stack, so the requester's finally has run - and its gate
+                // entry is gone - before this method returns. That is what the
+                // paragraph above relies on.
                 //
-                // Still true and still worth knowing: TrySetResult resumes the
-                // requester's continuation inline, on this stack, so the
-                // requester's finally runs before this method returns. That is why
-                // the entry is not removed here - see the comment above.
+                // What this line does not get is cover from the pump's try, and
+                // the difference matters to anyone changing the timeout
+                // mechanism. A requester continuation that resumes from here and
+                // throws is swallowed by UniTask before it can reach Dispatch's
+                // caller. Today that happens in AttachExternalCancellation's
+                // runner body,
+                //     try { core.TrySetResult(await task); }
+                //     catch (Exception ex) { core.TrySetException(ex); }
+                // (UniTaskExtensions.cs:314-328), where TrySetException on an
+                // already-completed core returns false and drops the exception
+                // with no report at all (UniTaskCompletionSource.cs:150-173).
+                // Dropping AttachExternalCancellation would not hand this line to
+                // the pump's try either: TrySignalCompletion invokes the
+                // continuation inside its own catch and routes a throw to
+                // UniTaskScheduler.PublishUnobservedTaskException
+                // (UniTaskCompletionSource.cs:910-917).
+                //
+                // So a broken requester continuation is contained but never
+                // reported to this session - the pump survives, and no
+                // SessionFault is published for it. That is a known diagnostic
+                // hole rather than a guarantee. The pump's try is insurance for
+                // future branches of this method; it is not what protects this
+                // line.
                 completion.TrySetResult(result.Payload);
                 return;
             }
@@ -401,14 +418,16 @@ namespace Echo.Harness.Application
         /// A bare SendAsync(...).Forget() here would be wrong twice over. Dispatch
         /// now runs inside the pump's try, so an escaping exception costs one
         /// message rather than the pump; this guard is kept because it reports the
-        /// failure against the right message id and keeps one broken subscriber
-        /// from silencing the rest. SendAsync is not async - it validates and
-        /// returns transport.SendAsync(...) directly - so an eagerly validating
-        /// transport throws on the pump's stack before any task exists and
-        /// Forget() never runs. And a task that faults later would be routed to
-        /// the unobserved-exception handler, which keeps the pump alive but
-        /// loses the Pong silently, and one lost Pong is what makes the server
-        /// declare the connection dead.
+        /// failure against the right message id. Without it a heartbeat send
+        /// failure would surface as a DispatchFailure against the inbound Ping
+        /// instead of a TransportFailure against the Pong that actually failed.
+        /// SendAsync is not async - it validates and returns
+        /// transport.SendAsync(...) directly - so an eagerly validating transport
+        /// throws on the pump's stack before any task exists and Forget() never
+        /// runs. And a task that faults later would be routed to the
+        /// unobserved-exception handler, which keeps the pump alive but loses the
+        /// Pong silently, and one lost Pong is what makes the server declare the
+        /// connection dead.
         /// </summary>
         private async UniTaskVoid ReplyToHeartbeatAsync()
         {
@@ -428,9 +447,10 @@ namespace Echo.Harness.Application
         /// <summary>
         /// Each handler gets its own try, and deliberately so. Dispatch now runs
         /// inside the pump's try, so an escaping exception costs one message
-        /// rather than the pump; this guard is kept because it reports the
-        /// failure against the right message id and keeps one broken subscriber
-        /// from silencing the rest.
+        /// rather than the pump; this guard is kept because it grades the failure
+        /// as a SubscriberFailure rather than a DispatchFailure - the message id
+        /// would be the same either way - and because catching per handler keeps
+        /// one broken subscriber from silencing the ones queued behind it.
         /// </summary>
         private void DeliverToSubscribers(ProtocolDecodeResult result)
         {
