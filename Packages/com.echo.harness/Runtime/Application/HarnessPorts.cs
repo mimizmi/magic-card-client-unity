@@ -90,4 +90,22 @@ namespace Echo.Harness.Application
         /// </summary>
         DateTimeOffset UtcNow { get; }
     }
+
+    /// <summary>
+    /// Moves the current continuation onto the session's context. A session's
+    /// receive pump resumes on whatever thread the transport's I/O completed on,
+    /// and its request timeouts resume on a timer thread; both are hopped through
+    /// here so that everything touching session state runs on one context and the
+    /// session itself needs no lock.
+    ///
+    /// The production implementation switches to the Unity main thread, which is
+    /// why this is a port rather than a direct call: Application is compiled with
+    /// noEngineReferences and cannot name a Unity type. A test implementation
+    /// completes synchronously, which is also what keeps EditMode tests
+    /// independent of a player loop that EditMode does not run.
+    /// </summary>
+    public interface ISessionScheduler
+    {
+        UniTask SwitchToSessionContextAsync(CancellationToken cancellationToken);
+    }
 }

@@ -12,6 +12,7 @@ namespace Echo.Harness.Application
 
         private readonly ITransport transport;
         private readonly IClock clock;
+        private readonly ISessionScheduler scheduler;
         private readonly List<Action<SessionFault>> faultHandlers = new List<Action<SessionFault>>();
         private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
             new Dictionary<MessageId, List<Action<object>>>();
@@ -21,10 +22,11 @@ namespace Echo.Harness.Application
         private CancellationTokenSource pumpCancellation;
         private bool disposed;
 
-        public ProtocolSession(ITransport transport, IClock clock)
+        public ProtocolSession(ITransport transport, IClock clock, ISessionScheduler scheduler)
         {
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
             this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         }
 
         public SessionState State { get; private set; } = SessionState.Disconnected;

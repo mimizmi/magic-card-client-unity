@@ -11,14 +11,20 @@ namespace Echo.Harness.Tests.EditMode
 {
     public sealed class ProtocolSessionLifecycleTests
     {
-        private static ProtocolSession NewSession(FakeTransport transport) =>
-            new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+        private static ProtocolSession CreateSession(
+            out FakeTransport transport,
+            out RecordingSessionScheduler scheduler)
+        {
+            transport = new FakeTransport();
+            scheduler = new RecordingSessionScheduler();
+            return new ProtocolSession(
+                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
+        }
 
         [Test]
         public void StartAsync_ConnectsTheTransportAndReportsConnected()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
 
             session.StartAsync(default).GetAwaiter().GetResult();
 
@@ -29,8 +35,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StartAsync_RejectsASecondStart()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out _, out _);
             session.StartAsync(default).GetAwaiter().GetResult();
 
             Assert.Throws<InvalidOperationException>(
@@ -40,8 +45,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StopAsync_FromDisconnectedIsANoOp()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out _, out _);
 
             Assert.DoesNotThrow(() => session.StopAsync(default).GetAwaiter().GetResult());
             Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
@@ -50,8 +54,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesAFaultForAnUnknownMessageId()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -70,8 +73,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesNoFaultForAWellFormedFrame()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -88,8 +90,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StopAsync_FromConnectedDisconnectsAndStopsThePump()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -107,8 +108,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Dispose_RejectsFurtherUseAndSilencesFaultSubscriptions()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -128,8 +128,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesAFaultForAMalformedPayloadAndKeepsRunning()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -145,8 +144,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_TreatsAReceiveFailureAsStreamDesynchronization()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -162,8 +160,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void FaultSubscription_StopsDeliveringAfterDisposal()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             var subscription = session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
