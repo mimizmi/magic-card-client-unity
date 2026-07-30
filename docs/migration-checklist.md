@@ -66,6 +66,15 @@ deliverable.
   that need one: the identity-checked gate removal in `RequestAsync`'s `finally`, and
   a synchronous `try`/`catch` heartbeat reply, which loses a `Pong` when the send
   faults after returning.
+- [ ] Give a single-flight gate rejection and a stale echo distinguishable exception
+  types. Both throw `InvalidOperationException` (`ProtocolSession.cs:165` and `:224`),
+  so a probe loop firing every 5 s against a 10 s deadline cannot tell "a request is
+  already in flight" from a genuine correlation mismatch without matching on the
+  message text.
+- [ ] Re-verify `Dispatch`'s completion-safety comment on any UniTask upgrade. It
+  quotes the private `RunTask` body of 2.5.11 verbatim, and that quotation is the
+  entire argument for why a resumed continuation cannot kill the receive pump from
+  outside its `try`. A version bump can invalidate it silently, with the suite green.
 - [ ] Settle one assertion convention for `SessionFault` contents and apply it across
   the session. Only `Kind` is asserted anywhere, leaving the heartbeat fault's
   `MessageId` and `Diagnostic` unpinned, and with them the correlation-mismatch

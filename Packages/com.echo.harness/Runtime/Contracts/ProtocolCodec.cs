@@ -51,6 +51,16 @@ namespace Echo.Harness.Contracts
             new ProtocolDecodeResult(messageId, null, failure, diagnostic);
     }
 
+    /// <summary>
+    /// Decoding never throws; a malformed body comes back as a failure result. That
+    /// is the opposite error model to <see cref="BinaryFrameCodec"/> in this same
+    /// directory, which throws on every malformed input, and the split is deliberate
+    /// rather than an inconsistency. A malformed frame is stream-fatal because the
+    /// byte boundaries are lost and every later read returns garbage; a malformed
+    /// body costs exactly one message and must not disconnect a player, which is
+    /// what a receive loop needs in order to grade the two differently. Do not infer
+    /// either model from the other.
+    /// </summary>
     public static class ProtocolCodec
     {
         public static byte[] EncodePayload(object payload)

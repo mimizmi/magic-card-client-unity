@@ -23,6 +23,16 @@ namespace Echo.Harness.Contracts
         public ReadOnlyMemory<byte> Payload { get; }
     }
 
+    /// <summary>
+    /// Every malformed input throws here, which is the opposite error model to
+    /// <see cref="ProtocolCodec"/> in this same directory, and the split is
+    /// deliberate rather than an inconsistency. A malformed frame means the byte
+    /// stream has lost its boundaries, so every later read returns garbage and
+    /// there is nothing to salvage; throwing is what lets a receive loop grade it
+    /// as fatal and disconnect. A malformed body costs exactly one message and must
+    /// not disconnect a player, so <see cref="ProtocolCodec"/> reports it as a
+    /// failure result and never throws. Do not infer either model from the other.
+    /// </summary>
     public static class BinaryFrameCodec
     {
         public static byte[] Encode(MessageId messageId, ReadOnlySpan<byte> payload)

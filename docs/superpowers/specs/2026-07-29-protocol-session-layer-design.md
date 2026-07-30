@@ -190,7 +190,9 @@ requester. A message with no subscribers is not an error.
 `ProbeRoundTripAsync` reads `IClock.UtcNow`, sends `ClientPingRequest{ts}`, awaits
 `ClientPingResponse`, reads `UtcNow` again, and returns the difference.
 
-It also verifies the echoed `ts` matches what it sent. On a mismatch it publishes a
+It also verifies the echoed `ts` is *equal* to what it sent — in both directions,
+not merely rejecting an echo from the future, because a stale reply can carry the
+larger value. On a mismatch it publishes a
 `CorrelationMismatch` fault **and throws**, rather than returning a latency figure
 derived from an unrelated reply — a wrong number that looks plausible is worse than
 a failure, because it would silently feed whatever the caller does with it.
