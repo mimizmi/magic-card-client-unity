@@ -8,7 +8,12 @@ namespace Echo.Harness.Application
 {
     public sealed class ProtocolSession : IProtocolSession
     {
-        public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(10);
+        /// <summary>
+        /// The deadline <see cref="ProbeRoundTripAsync"/> uses. It is not a default
+        /// for <see cref="RequestAsync{TResponse}"/>, which has no overload that
+        /// omits a timeout, and it is unreachable from <see cref="IProtocolSession"/>.
+        /// </summary>
+        public static readonly TimeSpan RoundTripProbeDeadline = TimeSpan.FromSeconds(10);
 
         /// <summary>
         /// How long a Dispose-initiated disconnect is given before it is abandoned.
@@ -188,7 +193,8 @@ namespace Echo.Harness.Application
 
             if (pendingRequests.ContainsKey(responseId))
             {
-                throw new InvalidOperationException(
+                throw new RequestAlreadyInFlightException(
+                    responseId,
                     $"A request awaiting {responseId} is already in flight. The protocol has " +
                     "no correlation id, so a second one could be answered with the first reply.");
             }
@@ -243,7 +249,7 @@ namespace Echo.Harness.Application
             var request = new ClientPingRequestDto { Ts = sentAt.ToUnixTimeMilliseconds() };
 
             var response = await RequestAsync<ClientPingResponseDto>(
-                MessageId.ClientPingRequest, request, DefaultRequestTimeout, cancellationToken);
+                MessageId.ClientPingRequest, request, RoundTripProbeDeadline, cancellationToken);
 
             if (response.Ts != request.Ts)
             {
@@ -254,7 +260,7 @@ namespace Echo.Harness.Application
                     SessionFaultKind.CorrelationMismatch,
                     MessageId.ClientPingResponse,
                     diagnostic));
-                throw new InvalidOperationException(diagnostic);
+                throw new CorrelationMismatchException(MessageId.ClientPingResponse, diagnostic);
             }
 
             return clock.UtcNow - sentAt;
@@ -402,10 +408,16 @@ namespace Echo.Harness.Application
                 }
                 catch (Exception exception)
                 {
+                    // The type name, unlike every other fault kind here. The
+                    // others name a failure the session already understands, so
+                    // the message is the whole story. DispatchFailure is by
+                    // definition the one nobody predicted, and
+                    // "Object reference not set to an instance of an object."
+                    // on its own says neither what threw nor where to look.
                     PublishFault(new SessionFault(
                         SessionFaultKind.DispatchFailure,
                         message.MessageId,
-                        exception.Message));
+                        $"{exception.GetType().Name}: {exception.Message}"));
                 }
             }
         }
@@ -415,12 +427,22 @@ namespace Echo.Harness.Application
             var result = ProtocolCodec.Decode(message.MessageId, message.Payload);
             if (!result.Succeeded)
             {
-                PublishFault(new SessionFault(
-                    result.Failure == ProtocolDecodeFailure.UnknownMessageId
-                        ? SessionFaultKind.UnknownMessageId
-                        : SessionFaultKind.MalformedPayload,
-                    message.MessageId,
-                    result.Diagnostic));
+                var kind = result.Failure == ProtocolDecodeFailure.UnknownMessageId
+                    ? SessionFaultKind.UnknownMessageId
+                    : SessionFaultKind.MalformedPayload;
+                PublishFault(new SessionFault(kind, message.MessageId, result.Diagnostic));
+
+                // The reply arrived; it just could not be read. Leaving the waiter
+                // pending makes it stall its whole timeout and then report a
+                // network failure that never happened. Failed after the fault is
+                // published so a consumer sees the cause before the effect.
+                if (pendingRequests.TryGetValue(message.MessageId, out var stalled))
+                {
+                    stalled.TrySetException(new InvalidOperationException(
+                        $"{message.MessageId} arrived but could not be decoded: " +
+                        result.Diagnostic));
+                }
+
                 return;
             }
 
@@ -517,8 +539,22 @@ namespace Echo.Harness.Application
         /// </summary>
         private void DeliverToSubscribers(ProtocolDecodeResult result)
         {
-            if (!subscribers.TryGetValue(result.MessageId, out var handlers))
+            if (!subscribers.TryGetValue(result.MessageId, out var handlers) ||
+                handlers.Count == 0)
             {
+                // A change from silently dropping it. The server's reconnect path
+                // sends LoginResponse and MatchFoundEvent back to back, so a
+                // consumer that subscribes after requesting loses the event with no
+                // trace. Until subscribe-before-request is enforced, this fault is
+                // the only thing that can show it happened.
+                //
+                // The Count check is not redundant: Subscribe leaves an empty list
+                // behind when the last subscription is disposed, so a key check
+                // alone would report a destination that is not there.
+                PublishFault(new SessionFault(
+                    SessionFaultKind.NoDestination,
+                    result.MessageId,
+                    $"{result.MessageId} decoded but no subscriber was registered."));
                 return;
             }
 
@@ -560,6 +596,12 @@ namespace Echo.Harness.Application
             // session on an application-lifetime token until disposal.
             CancelPump();
 
+            // Published before the disconnect is attempted, so the first
+            // TransportFailure a consumer sees is the cause rather than the close
+            // that followed it.
+            PublishFault(new SessionFault(
+                SessionFaultKind.TransportFailure, default, exception.Message));
+
             try
             {
                 await transport.DisconnectAsync(CancellationToken.None);
@@ -567,13 +609,8 @@ namespace Echo.Harness.Application
             catch (Exception disconnectFailure)
             {
                 PublishFault(new SessionFault(
-                    SessionFaultKind.TransportFailure,
-                    default,
-                    disconnectFailure.Message));
+                    SessionFaultKind.TransportFailure, default, disconnectFailure.Message));
             }
-
-            PublishFault(new SessionFault(
-                SessionFaultKind.TransportFailure, default, exception.Message));
         }
 
         /// <summary>

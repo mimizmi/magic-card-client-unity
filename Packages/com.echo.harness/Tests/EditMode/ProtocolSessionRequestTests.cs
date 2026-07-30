@@ -57,7 +57,7 @@ namespace Echo.Harness.Tests.EditMode
 
             // The protocol has no correlation id, so two in-flight logins would
             // race for one reply and one caller would get the other's answer.
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<RequestAlreadyInFlightException>(
                 () => session.RequestAsync<LoginResponseDto>(
                     MessageId.LoginRequest, new LoginRequestDto(), Generous, default)
                     .GetAwaiter().GetResult());
@@ -386,7 +386,12 @@ namespace Echo.Harness.Tests.EditMode
 
             // A latency number derived from an unrelated reply looks perfectly
             // plausible, which is exactly why it must not be returned.
-            Assert.Throws<InvalidOperationException>(() => pending.GetAwaiter().GetResult());
+            //
+            // The exact type, because NUnit's Assert.Throws<T> demands one:
+            // unlike a catch clause it does not accept a subclass, so this had
+            // to move with the throw rather than riding on the inheritance.
+            Assert.Throws<CorrelationMismatchException>(
+                () => pending.GetAwaiter().GetResult());
             Assert.That(faults, Has.Count.EqualTo(1));
             Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.CorrelationMismatch));
         }
@@ -403,7 +408,7 @@ namespace Echo.Harness.Tests.EditMode
             session.SubscribeToFaults(faults.Add);
 
             // The first probe is abandoned by cancellation rather than by waiting
-            // out DefaultRequestTimeout, which is ten seconds and is not a
+            // out RoundTripProbeDeadline, which is ten seconds and is not a
             // parameter of ProbeRoundTripAsync. Both routes leave the same state
             // behind - no pending entry for ClientPingResponse, and a reply still
             // owed by the server - and only one of them is deterministic.
@@ -431,7 +436,7 @@ namespace Echo.Harness.Tests.EditMode
             transport.EnqueueInbound(Frame(
                 MessageId.ClientPingResponse, "{\"ts\":" + abandonedTs + "}"));
 
-            var failure = Assert.Throws<InvalidOperationException>(
+            var failure = Assert.Throws<CorrelationMismatchException>(
                 () => retried.GetAwaiter().GetResult());
             Assert.That(failure.Message, Does.Contain(abandonedTs.ToString()));
             Assert.That(failure.Message, Does.Contain(retriedTs.ToString()));

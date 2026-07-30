@@ -79,10 +79,19 @@ namespace Echo.Harness.Tests.EditMode
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
 
+            // The subscription is part of the scenario, not scaffolding. A frame
+            // that decodes cleanly and then has nowhere to go publishes
+            // NoDestination, which is a real failure - the caller subscribed too
+            // late - rather than a counterexample to the claim below. Giving the
+            // message a destination is what keeps this test about decoding.
+            LoginResponseDto delivered = null;
+            session.Subscribe<LoginResponseDto>(MessageId.LoginResponse, dto => delivered = dto);
+
             transport.EnqueueInbound(Frame(
                 MessageId.LoginResponse,
                 "{\"success\":true,\"player_id\":\"p-1\",\"reconnect_token\":\"t-1\"}"));
 
+            Assert.That(delivered, Is.Not.Null);
             Assert.That(faults, Is.Empty,
                 "A fault means something failed; a message that decodes cleanly is not a failure.");
             Assert.That(session.State, Is.EqualTo(SessionState.Connected));

@@ -115,8 +115,18 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(session.State, Is.EqualTo(SessionState.Connected));
         }
 
+        /// <summary>
+        /// Was Dispatch_TreatsAMessageWithNoSubscribersAsNormal, and its assertion
+        /// was that no fault was published at all. That is no longer the contract:
+        /// an undeliverable message now publishes NoDestination, because dropping
+        /// it silently is exactly how a missed MatchFoundEvent used to vanish. The
+        /// half of the old intent that survives is pinned here instead - having
+        /// nowhere to go is not a stream failure, and the pump reads on - and the
+        /// fault list is still counted exactly, so a second unrelated fault would
+        /// still fail this.
+        /// </summary>
         [Test]
-        public void Dispatch_TreatsAMessageWithNoSubscribersAsNormal()
+        public void Dispatch_ReportsAMessageWithNoSubscribersWithoutFaultingThePump()
         {
             using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
@@ -124,7 +134,20 @@ namespace Echo.Harness.Tests.EditMode
 
             transport.EnqueueInbound(Frame(MessageId.TurnTimerEvent, "{}"));
 
-            Assert.That(faults, Is.Empty);
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.NoDestination));
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+
+            // State alone cannot tell a live pump from one that died inside
+            // Dispatch, for the reason spelled out in
+            // Heartbeat_SurvivesASendFailureWithoutKillingThePump. Only a later
+            // message actually arriving can.
+            var delivered = false;
+            session.Subscribe<TurnTimerEventDto>(MessageId.TurnTimerEvent, _ => delivered = true);
+            transport.EnqueueInbound(Frame(MessageId.TurnTimerEvent, "{}"));
+
+            Assert.That(delivered, Is.True,
+                "Reporting an undeliverable message must not cost the pump.");
         }
 
         /// <summary>
