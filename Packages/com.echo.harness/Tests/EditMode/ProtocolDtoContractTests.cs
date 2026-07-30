@@ -177,6 +177,30 @@ namespace Echo.Harness.Tests.EditMode
 
             foreach (var field in fields)
             {
+                Assert.That(
+                    declared.ContainsKey(field.JsonName),
+                    Is.True,
+                    $"{context}: {type.Name} is missing '{field.JsonName}'.");
+
+                // Arity, asserted for EVERY field and not only the ones carrying
+                // a type_ref. Nothing else in the suite reads
+                // ProtocolFieldDocument.Repeated, and ElementType below unwraps
+                // IReadOnlyList<T> unconditionally, so without this a repeated
+                // field declared as a bare element type compared equal. The two
+                // fields it closes outright are GameConfigEvent.characters and
+                // .fields, which carry no type_ref and have no serialization
+                // test: declaring either as JObject rather than
+                // IReadOnlyList<JObject> left the whole suite green while the
+                // server's first GameConfigEvent would decode to a
+                // MalformedPayload fault.
+                Assert.That(
+                    IsRepeatedShape(declared[field.JsonName].PropertyType),
+                    Is.EqualTo(field.Repeated),
+                    $"{context}: '{field.JsonName}' is {field.GoType} in Go, so it must " +
+                    (field.Repeated
+                        ? "be an IReadOnlyList<T> and is not."
+                        : "not be a collection and is one."));
+
                 if (string.IsNullOrEmpty(field.TypeRef))
                 {
                     continue;
@@ -199,12 +223,23 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         /// <summary>
+        /// The collection shape a repeated Go field maps to. Deliberately the
+        /// same shape <see cref="ElementType"/> unwraps, so a repeated field's
+        /// arity assertion and its type_ref assertion cannot disagree: if this
+        /// returns true the element type below is the one actually compared.
+        /// </summary>
+        private static bool IsRepeatedShape(Type type)
+        {
+            return type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IReadOnlyList<>);
+        }
+
+        /// <summary>
         /// Unwraps IReadOnlyList&lt;T&gt; so a repeated field compares against
         /// its element type. Non-collection types are returned unchanged.
         /// </summary>
         private static Type ElementType(Type type)
         {
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IReadOnlyList<>))
+            if (IsRepeatedShape(type))
             {
                 return type.GetGenericArguments()[0];
             }
