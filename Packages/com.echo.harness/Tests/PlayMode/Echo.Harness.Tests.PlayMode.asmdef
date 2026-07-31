@@ -3,6 +3,7 @@
   "rootNamespace": "Echo.Harness.Tests.PlayMode",
   "references": [
     "Echo.Harness.Application",
+    "Echo.Harness.Infrastructure",
     "Echo.Harness.Presentation",
     "Echo.Harness.Bootstrap",
     "Echo.Harness.TestKit",
