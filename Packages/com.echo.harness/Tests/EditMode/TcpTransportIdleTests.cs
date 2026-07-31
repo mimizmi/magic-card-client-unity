@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.IO;
+using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
@@ -151,6 +152,104 @@ namespace Echo.Harness.Tests.EditMode
                 Assert.That(failure, Is.Not.InstanceOf<ReadIdleTimeoutException>(),
                     "Reporting an orderly shutdown as a dead link would send a " +
                     "session into Faulted while it was stopping cleanly.");
+            });
+        }
+
+        /// <summary>
+        /// A token that is already cancelled when the receive is entered. This is not
+        /// a contrived case: a session whose pump is cancelled and then loops once
+        /// more calls ReceiveAsync with a token that is already in that state.
+        ///
+        /// Both assertions are load-bearing and neither is sufficient alone.
+        /// CreateLinkedTokenSource over an already-cancelled token returns an
+        /// already-cancelled source, and Token.Register on one of those invokes the
+        /// callback synchronously on the calling thread - so without an early check
+        /// the link is torn down before the first read is ever issued, and the caller
+        /// is told the peer closed. Asserting only the exception type would still pass
+        /// against a fix that merely relabels the failure while destroying the socket.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator AnAlreadyCancelledReceiveLeavesTheLinkAlone()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = await ConnectAsync(server, TimeSpan.FromSeconds(30));
+
+                using var cancellation = new CancellationTokenSource();
+                cancellation.Cancel();
+
+                var failure = await CaptureAsync(async () =>
+                    await transport.ReceiveAsync(cancellation.Token).Timeout(Patience));
+
+                Assert.That(failure, Is.InstanceOf<OperationCanceledException>(),
+                    "A caller that has already cancelled is asking to stop, not being " +
+                    "told its peer went away.");
+                Assert.That(transport.State, Is.EqualTo(TransportState.Connected),
+                    "Nothing was read and nothing timed out, so the link must still " +
+                    "be there afterwards - a cancelled receive is not a dead link.");
+            });
+        }
+
+        /// <summary>
+        /// The deadline lands in the gap between the header read and the body read.
+        /// That gap is real and wide: UniTask's ValueTask bridge captures Unity's
+        /// synchronization context, so a completed header read is posted to the
+        /// main-thread queue rather than resumed inline, and the whole time it sits
+        /// there undrained the reader is between its two ReadExactlyAsync calls.
+        ///
+        /// This is the watchdog's own primary path, so it has to produce the
+        /// watchdog's own diagnostic. Without the token check in the null-stream
+        /// guard, the body call sees the stream the deadline just nulled and reports
+        /// "The connection closed while a frame was being read" - the message this
+        /// file elsewhere calls indistinguishable from an ordinary peer close, for a
+        /// failure whose cause is known exactly.
+        ///
+        /// The Thread.Sleep is what makes the window deterministic rather than a
+        /// race, for the same reason as in
+        /// DisposingBetweenHeaderAndBodyFailsTheReceiveCleanly: awaiting here would
+        /// yield to the very pump that drains the continuation. The margins are wide
+        /// in both directions - the header arrives around 300 ms into a 1000 ms
+        /// window, and the sleep outlasts the deadline by hundreds of milliseconds -
+        /// so neither an early nor a late tick can turn this into a different test.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator ADeadlineBetweenTheHeaderAndTheBodyStillNamesTheIdleTimeout()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = await ConnectAsync(
+                    server, TimeSpan.FromMilliseconds(1000));
+
+                var receiving = transport.ReceiveAsync(CancellationToken.None);
+
+                // The reader has to be parked inside the header read before the
+                // header arrives, so that its completion is posted rather than
+                // resumed inline.
+                await UniTask.Delay(TimeSpan.FromMilliseconds(250), DelayType.Realtime);
+
+                var frame = BinaryFrameCodec.Encode(
+                    MessageId.PhaseChangeEvent,
+                    Encoding.UTF8.GetBytes("{\"phase\":\"action\"}"));
+                var header = new byte[6];
+                Array.Copy(frame, header, header.Length);
+
+                // Exactly the header and not one byte of the body, so the next thing
+                // the reader wants is a second trip through ReadExactlyAsync.
+                server.SendBytes(header);
+
+                // Blocking, not awaiting: the header read completes and queues its
+                // continuation while the pump that would drain it is held here, and
+                // the deadline fires from its timer thread in the middle of that.
+                Thread.Sleep(1200);
+
+                var failure = await CaptureAsync(async () =>
+                    await receiving.Timeout(Patience));
+
+                Assert.That(failure, Is.InstanceOf<ReadIdleTimeoutException>(),
+                    "A deadline that fires between the header and the body is still " +
+                    "the deadline firing, and has to say so.");
             });
         }
 

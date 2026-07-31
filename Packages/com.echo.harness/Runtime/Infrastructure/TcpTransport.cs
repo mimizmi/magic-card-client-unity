@@ -79,6 +79,15 @@ namespace Echo.Harness.Infrastructure
         // proof a race exists.
         private volatile SendBudget budget;
 
+        // Snapshotted rather than read live, and that is what makes the constructor
+        // guard below mean anything. TcpTransportOptions.ReadIdleTimeout has a public
+        // setter, so an options object mutated after construction would otherwise
+        // reach CancelAfter unchecked on the very next receive and reproduce exactly
+        // the two failures the guard exists to prevent. Every other option is already
+        // effectively pinned - SendBudgetPerSecond is captured into `budget` at
+        // connect, Host and Port are used once - so this was the one live read left.
+        private readonly TimeSpan readIdleTimeout;
+
         public TcpTransport(TcpTransportOptions options, IClock clock)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
@@ -97,6 +106,8 @@ namespace Echo.Harness.Infrastructure
                     this.options.ReadIdleTimeout,
                     "ReadIdleTimeout must be positive.");
             }
+
+            readIdleTimeout = this.options.ReadIdleTimeout;
         }
 
         public TransportState State => state;
@@ -265,6 +276,14 @@ namespace Echo.Harness.Infrastructure
                         failure,
                         cancellationToken);
                 }
+                // Reachable, and Task 7 is what made it so. `active` is captured
+                // above and then synchronous budget work runs before either await;
+                // the read-idle deadline's AbandonTheLink disposes that very stream
+                // from a timer thread, and a write issued against an already-disposed
+                // NetworkStream throws ObjectDisposedException synchronously rather
+                // than as an IOException. The capture window is the whole of that
+                // gap. Not covered by a test - the window is too narrow to open
+                // deliberately - so this is kept on the mechanism, not on evidence.
                 catch (ObjectDisposedException)
                 {
                     throw new EndOfStreamException(
@@ -287,6 +306,17 @@ namespace Echo.Harness.Infrastructure
             ThrowIfDisposed();
             EnsureConnected();
 
+            // Before the linked source exists, and this ordering is the whole point.
+            // CreateLinkedTokenSource over an already-cancelled token returns an
+            // already-cancelled source, and Token.Register on one of those invokes the
+            // callback synchronously on this thread - so AbandonTheLink would close the
+            // socket and set Disconnected before ReceiveFrameAsync was ever entered,
+            // and the read would then fail on the null-stream guard as
+            // EndOfStreamException. A caller who cancelled before asking would be told
+            // its peer closed, and the link it was merely declining to read from would
+            // be gone. Checking here costs one branch and leaves both facts true.
+            cancellationToken.ThrowIfCancellationRequested();
+
             // The deadline covers one whole frame and restarts with the next, so a
             // healthy but quiet link is not killed by the sum of its gaps. The
             // server sends a Ping every 15 s, which is what makes silence
@@ -301,11 +331,26 @@ namespace Echo.Harness.Infrastructure
             // Declared after the source so the two using declarations dispose in
             // reverse and this registration goes first. A registration outliving its
             // source is an ordering bug waiting to bite.
+            //
+            // KNOWN, MEASURED, ACCEPTED - do not "fix" this without reading the trade.
+            // The registration is only disposed once ReceiveFrameAsync has returned,
+            // so the timer can still fire in the gap between a frame being read
+            // successfully and this using going out of scope. The frame is delivered
+            // and the transport is left Disconnected, and the caller's next receive
+            // then fails with EnsureConnected's message instead of the idle
+            // diagnostic. The window was measured at roughly 2-4 ms on an actively
+            // ticking editor loop - not the ~150 ms an unfocused editor's tick would
+            // suggest - against a 45 s production deadline, and the outcome is nearly
+            // right anyway: the link genuinely was idle right up to the deadline.
+            // Closing it needs an Interlocked completed-flag set here and checked
+            // inside AbandonTheLink, which puts shared mutable state into a class that
+            // has deliberately avoided any. That is the shape a fix would take; the
+            // cost was judged higher than the symptom.
             using var closing = deadline.Token.Register(AbandonTheLink);
 
             // Registered before the timer is armed, so a very short timeout cannot
             // fire into a token that has no callback on it yet.
-            deadline.CancelAfter(options.ReadIdleTimeout);
+            deadline.CancelAfter(readIdleTimeout);
 
             try
             {
@@ -317,8 +362,8 @@ namespace Echo.Harness.Infrastructure
                 // through untouched, because reporting it as a dead link would
                 // send a session into Faulted during an orderly shutdown.
                 throw new ReadIdleTimeoutException(
-                    options.ReadIdleTimeout,
-                    $"No complete frame arrived within {options.ReadIdleTimeout}. The " +
+                    readIdleTimeout,
+                    $"No complete frame arrived within {readIdleTimeout}. The " +
                     "server sends a Ping every 15 seconds, so this much silence means " +
                     "the link is gone even though the socket has not said so.");
             }
@@ -342,9 +387,15 @@ namespace Echo.Harness.Infrastructure
         /// deadline token its first catch filter matches instead and it produces the
         /// OperationCanceledException that ReceiveAsync translates.
         ///
-        /// This runs on a thread-pool thread, because CancelAfter uses a timer, and
-        /// so it races the main-thread reader. That is deliberate: it is the same
-        /// race Dispose already runs, and CloseSocket already tolerates it.
+        /// The thread this runs on differs between the two paths, and only one of
+        /// them races anything. Measured rather than assumed: on the deadline path
+        /// CancelAfter fires from a timer, so this runs on a thread-pool thread and
+        /// does race the main-thread reader - deliberately, because it is the same
+        /// race Dispose already runs and CloseSocket already tolerates it. On the
+        /// caller-cancellation path a token is cancelled by someone calling Cancel,
+        /// and the callback runs inline on that caller's thread, which for every
+        /// caller in this codebase is the main thread. There is no race there at all.
+        /// Do not read the thread-pool half as a claim about both.
         ///
         /// State goes to Disconnected rather than being left at Connected with a
         /// null stream. Both leave every later call throwing - EnsureConnected
@@ -356,7 +407,9 @@ namespace Echo.Harness.Infrastructure
         /// the token is linked and a cancelled receive is in exactly the same
         /// position: its read is parked and nothing else will ever end it.
         /// Cancelling the pump and then disconnecting is already what a session's
-        /// StopAsync does; this only makes the disconnect immediate.
+        /// StopAsync does; this only makes the disconnect immediate. That reasoning
+        /// is about a receive already in flight; a caller that cancels before asking
+        /// never reaches here, because ReceiveAsync now rejects it up front.
         /// </summary>
         private void AbandonTheLink()
         {
@@ -459,6 +512,22 @@ namespace Echo.Harness.Infrastructure
             var active = stream;
             if (active == null)
             {
+                // The token is consulted first, and this guard was the one place in
+                // the read path that was cancellation-blind. A null stream here does
+                // not say who nulled it: a peer close and the idle deadline's own
+                // AbandonTheLink land identically. The deadline landing between this
+                // method's two calls - header read completed, its continuation still
+                // queued on the main thread, body read not yet issued - is not a
+                // corner: it is the watchdog's own primary path, and reporting it as
+                // "the connection closed" gives back the message this file elsewhere
+                // calls indistinguishable from an ordinary peer close, for a failure
+                // whose cause is known exactly. Under a cancelled token the throw
+                // below would be a worse answer than the one the token already has.
+                //
+                // Unconditional, for the same reason the trailing catch clauses below
+                // are bare: a check that cannot be skipped cannot miss.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 throw new EndOfStreamException(
                     "The connection closed while a frame was being read.");
             }
@@ -567,10 +636,18 @@ namespace Echo.Harness.Infrastructure
     }
 
     /// <summary>
-    /// No complete frame arrived within the idle window. Derived from IOException
-    /// because that is what the session already grades as a desynchronized stream,
-    /// and a link the kernel has not yet noticed is dead deserves the same
-    /// treatment.
+    /// No complete frame arrived within the idle window.
+    ///
+    /// The load-bearing property is that this is NOT an OperationCanceledException.
+    /// ProtocolSession.RunPumpAsync catches that one and returns quietly, and faults
+    /// the stream on everything else; it does not switch on exception type anywhere,
+    /// so "everything else" is the whole of what makes a dead link fatal. Being an
+    /// IOException buys nothing behavioural today - it is chosen because a link the
+    /// kernel has not yet noticed is dead belongs in the same family as a
+    /// desynchronized stream, and because it keeps a caller's `catch (IOException)`
+    /// around a receive working. Changing the base class would not change how a
+    /// session grades this; deriving it from OperationCanceledException would, and
+    /// would silently turn a dead link into a clean shutdown.
     /// </summary>
     public sealed class ReadIdleTimeoutException : IOException
     {
