@@ -31,6 +31,22 @@ namespace Echo.Harness.Infrastructure
         private volatile NetworkStream stream;
         private volatile bool disposed;
 
+        // Deliberately never disposed. SemaphoreSlim.Dispose does not release
+        // waiters, so a sender parked in WaitAsync when Dispose ran would never be
+        // signalled and would hang forever; and an in-flight sender's
+        // finally { sendGate.Release(); } would throw ObjectDisposedException,
+        // replacing the real write failure with a bookkeeping one. Left alive, the
+        // gate holder's write fails fast against the closed socket, its finally
+        // releases, and the parked caller then fails cleanly on the null-stream
+        // guard in SendAsync. A SemaphoreSlim only owns an OS handle once
+        // AvailableWaitHandle is touched, and nothing here touches it.
+        private readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
+
+        // volatile for the same reason as client and stream above: written by
+        // ConnectAsync and read by a SendAsync that may resume on another thread,
+        // with no lock between them.
+        private volatile SendBudget budget;
+
         public TcpTransport(TcpTransportOptions options, IClock clock)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
@@ -59,6 +75,11 @@ namespace Echo.Harness.Infrastructure
             try
             {
                 await connecting.ConnectAsync(options.Host, options.Port).AsUniTask();
+
+                // Published ahead of the fields that advertise a usable transport,
+                // so a send can never find a Connected transport with no budget
+                // behind it.
+                budget = new SendBudget(options.SendBudgetPerSecond, clock);
 
                 // Inside the try, not after it. Cancellation can fire between a
                 // successful connect and the registration being disposed, and the
@@ -99,6 +120,7 @@ namespace Echo.Harness.Infrastructure
         {
             client = null;
             stream = null;
+            budget = null;
             State = TransportState.Disconnected;
 
             try
@@ -111,9 +133,71 @@ namespace Echo.Harness.Infrastructure
             }
         }
 
-        public UniTask SendAsync(TransportMessage message, CancellationToken cancellationToken)
+        public async UniTask SendAsync(
+            TransportMessage message,
+            CancellationToken cancellationToken)
         {
-            throw new NotImplementedException("Implemented in Task 6.");
+            ThrowIfDisposed();
+            EnsureConnected();
+
+            // Encoded before the gate is taken: BinaryFrameCodec.Encode rejects an
+            // oversized payload, and there is no reason to make other senders wait
+            // behind a frame that will never be written.
+            var frame = BinaryFrameCodec.Encode(message.MessageId, message.Payload);
+
+            // Acquired outside the try, so a cancelled or failed WaitAsync cannot
+            // reach a finally that releases a gate it never took.
+            await sendGate.WaitAsync(cancellationToken).AsUniTask();
+            try
+            {
+                // Captured once for the reason spelled out at ReadExactlyAsync's
+                // capture: the field can be nulled by a Dispose or DisconnectAsync
+                // that runs while this continuation sits in the main-thread queue,
+                // and re-reading it after an await dereferences null. Taken after
+                // the gate rather than before it because the wait is itself an await
+                // and the window covers it.
+                var active = stream;
+                if (active == null)
+                {
+                    throw new EndOfStreamException(
+                        "The connection closed before the frame could be sent.");
+                }
+
+                // Inside the gate, not before it. Tokens must correspond to bytes
+                // actually placed on the wire, in wire order; checking outside lets
+                // two callers both pass and then acquire the gate in the opposite
+                // order, so the sequence the server rate-limits is not the sequence
+                // that was checked. TryConsume is not thread-safe on its own either
+                // - it is a read-modify-write over a plain int - and being inside
+                // the gate is the whole of what makes it safe.
+                //
+                // Pong is exempt because the server handles it ahead of its own
+                // limiter and never counts it. Refusing a Pong here would cause the
+                // heartbeat disconnect this guard exists to prevent, and the
+                // symptom would appear 35 seconds later with no obvious cause.
+                if (message.MessageId != MessageId.Pong && !budget.TryConsume())
+                {
+                    throw new SendBudgetExceededException(
+                        message.MessageId,
+                        $"Sending {message.MessageId} would exceed " +
+                        $"{options.SendBudgetPerSecond} messages per second. The server " +
+                        "closes the connection without an error frame when that limit " +
+                        "is passed, so this throws instead of queueing: a caller looping " +
+                        "faster than the protocol allows is a defect worth surfacing.");
+                }
+
+                // One write for the whole frame. BinaryFrameCodec.Encode returns the
+                // header and body in a single buffer for exactly this reason, and
+                // the server merges them in its EncodeFrame for the same one.
+                await active
+                    .WriteAsync(new ReadOnlyMemory<byte>(frame), cancellationToken)
+                    .AsUniTask();
+                await active.FlushAsync(cancellationToken).AsUniTask();
+            }
+            finally
+            {
+                sendGate.Release();
+            }
         }
 
         public async UniTask<TransportMessage> ReceiveAsync(CancellationToken cancellationToken)

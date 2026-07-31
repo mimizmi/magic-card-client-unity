@@ -1,0 +1,71 @@
+using System;
+using Echo.Harness.Infrastructure;
+using Echo.Harness.TestKit;
+using NUnit.Framework;
+
+namespace Echo.Harness.Tests.EditMode
+{
+    public sealed class SendBudgetTests
+    {
+        [Test]
+        public void ABudgetOfThirtyAllowsThirtyThenRefuses()
+        {
+            var budget = new SendBudget(30, new ManualClock(DateTimeOffset.UnixEpoch));
+
+            for (var i = 0; i < 30; i++)
+            {
+                Assert.That(budget.TryConsume(), Is.True, $"Send {i + 1} of 30.");
+            }
+
+            Assert.That(budget.TryConsume(), Is.False,
+                "The server's limit is 30 per second and it disconnects silently.");
+        }
+
+        [Test]
+        public void TokensRefillOverTime()
+        {
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var budget = new SendBudget(30, clock);
+            for (var i = 0; i < 30; i++)
+            {
+                budget.TryConsume();
+            }
+
+            // One interval is a thirtieth of a second, matching the server's own
+            // rateLimitRefillInterval.
+            clock.Advance(TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 30));
+
+            Assert.That(budget.TryConsume(), Is.True);
+            Assert.That(budget.TryConsume(), Is.False, "Exactly one token refilled.");
+        }
+
+        [Test]
+        public void RefillNeverExceedsTheMaximum()
+        {
+            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var budget = new SendBudget(30, clock);
+            clock.Advance(TimeSpan.FromMinutes(5));
+
+            for (var i = 0; i < 30; i++)
+            {
+                Assert.That(budget.TryConsume(), Is.True);
+            }
+
+            Assert.That(budget.TryConsume(), Is.False,
+                "A long idle period must not build a burst the server will reject.");
+        }
+
+        [Test]
+        public void ANonPositiveBudgetIsRejected()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => new SendBudget(0, new ManualClock(DateTimeOffset.UnixEpoch)));
+        }
+
+        [Test]
+        public void ANullClockIsRejected()
+        {
+            Assert.Throws<ArgumentNullException>(() => new SendBudget(30, null));
+        }
+    }
+}
