@@ -33,9 +33,20 @@ namespace Echo.Harness.Tests.PlayMode
         /// The scheduler's doc comment claims the already-on-main-thread case costs
         /// nothing. Asserting only "the thread is still the main thread" would hold
         /// whether the switch returned inline, yielded one frame, or yielded a
-        /// hundred, so it would measure nothing; the frame count is what actually
-        /// measures the claim. The thread id is kept alongside it because that is
-        /// what would break if the hop were ever swapped for a thread-pool one.
+        /// hundred, so it would measure nothing. The thread id is kept alongside the
+        /// rest because that is what would break if the hop were ever swapped for a
+        /// thread-pool one.
+        ///
+        /// <para>Two assertions measure the cost, not one, because the frame count
+        /// alone under-measures the claim. Time.frameCount only advances at frame
+        /// boundaries, so a hop rewritten as
+        /// <c>await UniTask.Yield(PlayerLoopTiming.LastPostLateUpdate)</c> resumes
+        /// later within the SAME frame and leaves the count untouched - a real yield
+        /// that the frame-count assertion passes. That was verified by mutation: with
+        /// the yield in place the frame-count assertion still passed and only the
+        /// status assertion below failed. Completing without yielding means the
+        /// returned UniTask is already complete when the call returns, which is what
+        /// the status check pins directly.</para>
         /// </summary>
         [UnityTest]
         public IEnumerator SwitchingWhileAlreadyOnTheMainThreadCostsNoFrame() =>
@@ -45,7 +56,16 @@ namespace Echo.Harness.Tests.PlayMode
                 var scheduler = new MainThreadSessionScheduler();
                 var frameBefore = Time.frameCount;
 
-                await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
+                var hop = scheduler.SwitchToSessionContextAsync(CancellationToken.None);
+
+                Assert.That(
+                    hop.Status.IsCompletedSuccessfully(),
+                    Is.True,
+                    "Already on the main thread, the hop must be finished before the " +
+                    "call returns. A hop that is still pending here yielded, even if " +
+                    "it resumes inside this same frame and costs no frame count.");
+
+                await hop;
 
                 Assert.That(
                     Time.frameCount,
@@ -57,8 +77,9 @@ namespace Echo.Harness.Tests.PlayMode
             });
 
         /// <summary>
-        /// RecordingSessionScheduler throws OperationCanceledException on a cancelled
-        /// token and every EditMode session test is written against that double. If
+        /// RecordingSessionScheduler surfaces OperationCanceledException on a
+        /// cancelled token - as a cancelled UniTask, awaited, not thrown out of the
+        /// call - and every EditMode session test is written against that double. If
         /// production disagreed, the EditMode suite would be pinning a contract that
         /// never ships.
         /// </summary>
@@ -83,9 +104,9 @@ namespace Echo.Harness.Tests.PlayMode
                 Assert.That(
                     canceled,
                     Is.True,
-                    "A cancelled token has to surface as OperationCanceledException, " +
-                    "because that is the contract RecordingSessionScheduler pins for " +
-                    "the whole EditMode session suite.");
+                    "A cancelled token has to surface as OperationCanceledException " +
+                    "on await, because that is the contract RecordingSessionScheduler " +
+                    "pins for the whole EditMode session suite.");
             });
 
         /// <summary>

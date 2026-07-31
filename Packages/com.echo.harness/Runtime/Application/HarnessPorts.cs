@@ -98,11 +98,16 @@ namespace Echo.Harness.Application
     /// here so that everything touching session state runs on one context and the
     /// session itself needs no lock.
     ///
-    /// The production implementation switches to the Unity main thread, which is
-    /// why this is a port rather than a direct call: Application is compiled with
-    /// noEngineReferences and cannot name a Unity type. A test implementation
-    /// completes synchronously, which is also what keeps EditMode tests
-    /// independent of a player loop that EditMode does not run.
+    /// The production implementation switches to the Unity main thread. That is
+    /// not on its own why this is a port. Application is compiled with
+    /// noEngineReferences and cannot name a Unity type, but the direct call names
+    /// no Unity type either: UniTask's main-thread awaitable is entirely Cysharp,
+    /// which this assembly already references, and a probe calling it from here
+    /// was measured to compile and to leave the architecture gate green. The port
+    /// exists because a test implementation completes synchronously, which is what
+    /// keeps EditMode tests independent of a player loop that EditMode does not
+    /// run, and because a session should not hard-code which context it confines
+    /// to.
     /// </summary>
     public interface ISessionScheduler
     {
