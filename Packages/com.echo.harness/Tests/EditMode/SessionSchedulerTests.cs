@@ -24,6 +24,13 @@ namespace Echo.Harness.Tests.EditMode
                 Is.EqualTo(Thread.CurrentThread.ManagedThreadId));
         }
 
+        /// <summary>
+        /// Awaited, not called bare. Production is an <c>async UniTask</c> method,
+        /// which structurally cannot throw before it returns; it hands back a
+        /// cancelled UniTask and the exception surfaces on await. Asserting the
+        /// throw at the call site would pin a shape no production scheduler can
+        /// have, leaving the suite green against a contract that never ships.
+        /// </summary>
         [Test]
         public void RecordingSchedulerHonoursCancellation()
         {
@@ -31,8 +38,9 @@ namespace Echo.Harness.Tests.EditMode
             using var cancellation = new CancellationTokenSource();
             cancellation.Cancel();
 
-            Assert.Throws<OperationCanceledException>(
-                () => scheduler.SwitchToSessionContextAsync(cancellation.Token));
+            var task = scheduler.SwitchToSessionContextAsync(cancellation.Token);
+
+            Assert.Throws<OperationCanceledException>(() => task.GetAwaiter().GetResult());
             Assert.That(scheduler.SwitchCount, Is.EqualTo(0));
         }
 
