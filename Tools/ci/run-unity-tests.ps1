@@ -30,12 +30,15 @@ function Invoke-ConnectedUnityTestMode {
         [string]$Mode
     )
 
-    # The previous run's result stays on disk and test_status keeps serving it, so
-    # a stale "completed" from the mode that ran before this one is indistinguishable
-    # from this one's. Removing the file first makes test_status answer "no_tests"
-    # until the new run writes it, which is the whole of what makes the poll below
-    # unambiguous. This is not hypothetical: a PlayMode request issued while
-    # EditMode's result was still on disk read back EditMode's own 135 passes.
+    # Belt-and-braces, not the load-bearing guard. A stale "completed" from the
+    # mode that ran before this one is indistinguishable from this one's, and that
+    # is not hypothetical - a PlayMode request issued while EditMode's result was
+    # still on disk read back EditMode's own 135 passes. But the cause was the old
+    # shape: the combined run_tests ran EditMode through the synchronous path,
+    # which does not clear the status file. The per-mode --async_tests call below
+    # clears it itself before starting, so this delete closes no window the
+    # package leaves open. It is kept because it costs nothing and makes the
+    # invariant local instead of a property of a package version.
     Remove-Item -LiteralPath $StatusPath -Force -ErrorAction SilentlyContinue
 
     Write-Host "Running $Mode tests through the connected Unity editor..."
@@ -78,7 +81,28 @@ function Invoke-ConnectedUnityTestMode {
             throw "Unity Pipeline test_status ($Mode) failed: $($StatusEnvelope.errors -join '; ')"
         }
         $Status = $StatusEnvelope.data.result | ConvertFrom-Json
+
+        # Every terminal status, not just the happy one. The runner also writes
+        # "error" - on async setup failure, on a results-write failure, and on
+        # "Tests did not complete" - and "cancelled". Waiting for "completed"
+        # alone turns each of those into fifteen minutes of silence followed by a
+        # timeout that names the wrong cause and discards the message explaining
+        # the right one.
+        if ($Status.status -eq 'error' -or $Status.status -eq 'cancelled') {
+            throw "Unity $Mode tests reported status '$($Status.status)': $($Status.message)"
+        }
     } while ($Status.status -ne 'completed')
+
+    # A run that found nothing is a failure, not a pass. When the test list comes
+    # back empty - an assembly that failed to compile, or a filter that matches
+    # nothing - the runner writes "completed" with every counter at zero, and a
+    # bare passed-ne-total check reads 0 -ne 0 as success and turns the whole gate
+    # green. The previous shape of this script caught that with a null check on
+    # the summary; this replaces it with one that also catches an empty run.
+    if ([int]$Status.summary.total -le 0) {
+        throw "Unity $Mode reported no tests at all. An assembly that fails to " +
+              "compile reaches here as an empty run, which is not a pass."
+    }
 
     Write-Host "$($Mode): $($Status.summary.passed)/$($Status.summary.total) passed."
     if ([int]$Status.summary.passed -ne [int]$Status.summary.total) {

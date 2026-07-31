@@ -506,13 +506,17 @@ namespace Echo.Harness.Application
         /// failure against the right message id. Without it a heartbeat send
         /// failure would surface as a DispatchFailure against the inbound Ping
         /// instead of a TransportFailure against the Pong that actually failed.
-        /// SendAsync is not async - it validates and returns
-        /// transport.SendAsync(...) directly - so an eagerly validating transport
-        /// throws on the pump's stack before any task exists and Forget() never
-        /// runs. And a task that faults later would be routed to the
-        /// unobserved-exception handler, which keeps the pump alive but loses the
-        /// Pong silently, and one lost Pong is what makes the server declare the
-        /// connection dead.
+        /// The failure can arrive in either of two shapes, and awaiting inside the
+        /// try is what covers both. This session's own SendAsync is not async - it
+        /// validates and returns transport.SendAsync(...) directly - so its
+        /// validation throws on the pump's stack before any task exists, and a
+        /// Forget() would never run. The transport's SendAsync, by contrast, has
+        /// been async since it acquired a write gate, so its validation is captured
+        /// into the returned UniTask rather than thrown. A Forget() would miss the
+        /// first shape and lose the second. And a task that faults later would be
+        /// routed to the unobserved-exception handler, which keeps the pump alive
+        /// but loses the Pong silently, and one lost Pong is what makes the server
+        /// declare the connection dead.
         /// </summary>
         private async UniTaskVoid ReplyToHeartbeatAsync()
         {

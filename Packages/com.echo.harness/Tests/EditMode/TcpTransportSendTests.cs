@@ -34,15 +34,19 @@ namespace Echo.Harness.Tests.EditMode
         /// the Pong, in UniTaskStatus.Pending at the same instant.
         ///
         /// Read what this test does and does not prove. It proves the send path
-        /// delivers whole frames under real concurrency. It does NOT, on this
-        /// platform, discriminate the sendGate: with the gate deleted the run still
-        /// passes, and it was pushed to 64 senders of 1,000,000 bytes and to 99
-        /// senders of 262,144 bytes without ever interleaving. Windows serializes
-        /// the overlapped sends beneath us, so byte-level interleaving cannot be
-        /// produced from a test here. The gate is still required - NetworkStream
-        /// does not support concurrent writes by contract, other platforms do split
-        /// a large write, and the gate is what makes SendBudget.TryConsume's
-        /// read-modify-write safe - but do not cite this test as the evidence.
+        /// delivers whole frames under real concurrency, and it is a live
+        /// regression test for the gate's bookkeeping: a lost Release, a Release on
+        /// a path that never acquired, or a deadlock all hang it at Timeout.
+        ///
+        /// It does NOT discriminate the gate's presence here. With the gate deleted
+        /// the run still passes, and it was pushed to 64 senders of 1,000,000 bytes
+        /// and to 99 senders of 262,144 bytes without ever interleaving. Something
+        /// beneath this code serializes the overlapped sends - the experiment varied
+        /// only size and sender count, so it cannot say whether that is Winsock or
+        /// Mono's own per-socket async queue, and no conclusion should be drawn
+        /// about any other platform or runtime. The gate's justification is on the
+        /// sendGate field in TcpTransport, which is where someone about to delete it
+        /// will be looking; do not cite this test as the evidence.
         /// </summary>
         private const int ConcurrentSenders = 8;
         private const int InterleavingBodyBytes = 524_288;
@@ -129,6 +133,14 @@ namespace Echo.Harness.Tests.EditMode
 
                 Assert.That(phaseFrames, Is.EqualTo(ConcurrentSenders));
                 Assert.That(pongFrames, Is.EqualTo(1));
+
+                // Asserted rather than assumed. WaitForFramesAsync returns as soon
+                // as the count is reached, so a corruption that produced exactly
+                // this many decodable frames and then desynchronized the reader
+                // would satisfy every assertion above it.
+                Assert.That(server.ReadFailure, Is.Null,
+                    "The loopback reader stopped, which means the bytes after the "
+                    + "frames it did decode were not frame-aligned.");
             });
         }
 
@@ -185,19 +197,27 @@ namespace Echo.Harness.Tests.EditMode
                 // appear with no obvious cause. Any throw here fails the test: the
                 // awaits below are unguarded, so a SendBudgetExceededException would
                 // surface as the test's own failure.
-                for (var i = 0; i < 100; i++)
+                //
+                // Thirty-five, not a hundred. The budget is thirty and the loop
+                // above already exhausted it, so the first Pong through settles the
+                // question; the rest only guard against a second cap hiding at the
+                // same figure, and thirty-five clears that. The count is not free -
+                // each await waits for the editor loop to resume it, so a hundred
+                // Pongs made this single test twenty seconds long and most of a
+                // suite that then overran the test runner's own ceiling.
+                for (var i = 0; i < 35; i++)
                 {
                     await transport.SendAsync(
                         new TransportMessage(MessageId.Pong, new byte[0]),
                         CancellationToken.None);
                 }
 
-                await server.WaitForFramesAsync(130, Patience);
+                await server.WaitForFramesAsync(65, Patience);
             });
         }
 
         [UnityTest]
-        public IEnumerator APayloadOverTheBoundIsRefusedBeforeTheGate()
+        public IEnumerator APayloadOverTheBoundIsRefused()
         {
             return UniTask.ToCoroutine(async () =>
             {

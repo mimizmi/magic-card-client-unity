@@ -9,6 +9,12 @@ namespace Echo.Harness.Infrastructure
     /// one second divided by that maximum, and a cap so an idle period cannot build
     /// a burst. Driven by IClock rather than the wall clock so a test can exhaust
     /// and refill it without sleeping.
+    ///
+    /// <para><b>Not thread-safe.</b> TryConsume is a read-modify-write over
+    /// <c>tokens</c> and <c>lastFill</c> with no synchronization of its own. Its
+    /// only caller holds TcpTransport's send gate across the call, which is what
+    /// makes it safe there and is also what keeps tokens in the same order as the
+    /// bytes they account for. A second caller must supply its own exclusion.</para>
     /// </summary>
     public sealed class SendBudget
     {
@@ -24,6 +30,19 @@ namespace Echo.Harness.Infrastructure
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(perSecond), perSecond, "A send budget must be positive.");
+            }
+
+            // Above one tick per message the refill interval truncates to zero and
+            // TryConsume divides by it. Rejected here rather than left to fail at
+            // the first send, where the DivideByZeroException would surface as a
+            // transport fault naming nothing that led to it.
+            if (perSecond > TimeSpan.TicksPerSecond)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(perSecond),
+                    perSecond,
+                    $"A send budget above {TimeSpan.TicksPerSecond} per second has " +
+                    "a refill interval of less than one tick and cannot be measured.");
             }
 
             this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
