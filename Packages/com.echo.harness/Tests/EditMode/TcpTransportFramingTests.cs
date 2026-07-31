@@ -153,21 +153,17 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         /// <summary>
-        /// Disposing the transport while a frame is half-read must surface as
-        /// EndOfStreamException. This is the local-dispose path, distinct from
-        /// ACloseMidBodyFailsTheReceive above, which closes the far end instead.
+        /// Disposing the transport while the reader is parked mid-body must surface
+        /// as EndOfStreamException. This is the local-disposal path - the parked
+        /// ReadAsync fails with ObjectDisposedException - and is distinct from
+        /// ACloseMidBodyFailsTheReceive above, which closes the far end and arrives
+        /// as a zero-length read or IOException. Both must land on
+        /// EndOfStreamException, by different routes.
         ///
-        /// Read the scope of this test honestly: it does NOT pin I1, the
-        /// capture-once fix in ReadExactlyAsync. It was written for that and does
-        /// not achieve it - verified by reverting the fix, against which this test
-        /// still passes. By the time Dispose runs here the reader is already parked
-        /// inside ReadAsync, so the stream field was dereferenced before it was
-        /// nulled and the disposal arrives as ObjectDisposedException either way.
-        /// I1's window is the instant between an I/O completion and the next
-        /// dereference, both of which run inside the async continuation on the
-        /// thread pool, and a test driving the socket from the main thread cannot
-        /// deterministically land a Dispose inside it. A racing attempt would be
-        /// flaky, which is worse than absent.
+        /// The await below is load-bearing: it yields to the pump, so the reader is
+        /// back inside ReadAsync before Dispose lands. The companion test
+        /// DisposingBetweenHeaderAndBodyFailsTheReceiveCleanly deliberately does the
+        /// opposite and blocks instead, to catch the nulled-field case.
         /// </summary>
         [UnityTest]
         public IEnumerator DisposingMidFrameFailsTheReceiveCleanly()
@@ -193,6 +189,60 @@ namespace Echo.Harness.Tests.EditMode
                 var failure = await CaptureAsync(async () => await receiving.Timeout(Patience));
                 Assert.That(failure, Is.InstanceOf<EndOfStreamException>(),
                     "A disposal mid-frame must read as end of stream.");
+            });
+        }
+
+        /// <summary>
+        /// Pins I1: the capture of the stream field in ReadExactlyAsync.
+        ///
+        /// UniTask's ValueTask bridge is a bare await, so it captures
+        /// SynchronizationContext.Current and a completed read's continuation is
+        /// posted to Unity's main-thread queue rather than resumed inline. That
+        /// makes I1's window main-thread and wide: it is the whole interval the
+        /// continuation sits in the queue undrained.
+        ///
+        /// So this test must NOT await between sending and disposing - awaiting
+        /// yields to the very pump that drains the continuation, which re-parks the
+        /// reader inside ReadAsync and closes the window. Blocking with Thread.Sleep
+        /// keeps the continuation queued while the header read completes, so Dispose
+        /// nulls the stream field before the resumed loop reaches the body read.
+        ///
+        /// Against the unfixed reader that is a NullReferenceException from
+        /// dereferencing the nulled field. Against the fixed one it is the null
+        /// check, as EndOfStreamException.
+        ///
+        /// Not flaky, because the failure mode is benign: if 250 ms were ever too
+        /// short the reader would simply still be parked, the disposal would arrive
+        /// as ObjectDisposedException, and the assertion would still hold. The risk
+        /// is losing coverage, never a false failure.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator DisposingBetweenHeaderAndBodyFailsTheReceiveCleanly()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = await ConnectAsync(server);
+
+                var receiving = transport.ReceiveAsync(CancellationToken.None);
+                var frame = BinaryFrameCodec.Encode(
+                    MessageId.PhaseChangeEvent,
+                    Encoding.UTF8.GetBytes("{\"phase\":\"action\"}"));
+
+                // Exactly the header, so the next thing the reader wants is the body
+                // and it has to come back through ReadExactlyAsync to get it.
+                server.SendBytes(Slice(frame, 0, 6));
+
+                // Blocking, not awaiting: the header read completes and queues its
+                // continuation while the pump that would drain it is held here.
+                Thread.Sleep(250);
+                transport.Dispose();
+
+                var failure = await CaptureAsync(async () => await receiving.Timeout(Patience));
+                Assert.That(failure, Is.InstanceOf<EndOfStreamException>(),
+                    "A disposal observed between the header and the body must read " +
+                    "as end of stream, never as a NullReferenceException from the " +
+                    "nulled stream field.");
             });
         }
 

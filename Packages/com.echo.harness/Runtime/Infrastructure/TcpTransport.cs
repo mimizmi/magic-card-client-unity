@@ -15,11 +15,18 @@ namespace Echo.Harness.Infrastructure
         private readonly byte[] header =
             new byte[WireFrameSpec.LengthPrefixBytes + WireFrameSpec.MessageIdBytes];
 
-        // volatile because these are read and written from different threads
-        // without a lock: socket I/O completes on the thread pool while Dispose or
-        // DisconnectAsync can run on the session's context. The capture in
-        // ReadExactlyAsync depends on seeing a current value rather than one the
-        // jitter cached in a register across the loop.
+        // volatile for visibility, not for atomicity. These are written by Dispose
+        // and DisconnectAsync and read by the receive path, with no lock between
+        // them, so a plain field leaves a reader free to observe a stale value
+        // indefinitely. ReadExactlyAsync's capture must see the null a concurrent
+        // CloseSocket wrote, and ThrowIfDisposed must see a concurrent Dispose.
+        //
+        // State belongs to this same set - written by ConnectAsync, DisconnectAsync
+        // and Dispose, read by EnsureConnected next to stream - and is not volatile
+        // only because it is an auto-property and the modifier is not legal on one.
+        // Converting it to a backing field would buy the same visibility; it is left
+        // alone because nothing today races on it in a way the stream null check
+        // does not already cover, not because it is in a different category.
         private volatile TcpClient client;
         private volatile NetworkStream stream;
         private volatile bool disposed;
@@ -62,10 +69,16 @@ namespace Echo.Harness.Infrastructure
                 stream = connecting.GetStream();
                 State = TransportState.Connected;
             }
-            catch (Exception) when (cancellationToken.IsCancellationRequested)
+            catch (Exception failure) when (cancellationToken.IsCancellationRequested)
             {
                 AbandonConnect(connecting);
-                throw new OperationCanceledException(cancellationToken);
+
+                // The original is kept as the inner exception for the same reason as
+                // in the receive path: it names what the cancellation callback's
+                // Close() actually broke, which is the only clue to whether the
+                // connect had already succeeded.
+                throw new OperationCanceledException(
+                    "The connect was cancelled.", failure, cancellationToken);
             }
             catch (Exception)
             {
@@ -173,16 +186,25 @@ namespace Echo.Harness.Infrastructure
             int count,
             CancellationToken cancellationToken)
         {
-            // Captured once, deliberately. This loop suspends at every await, and
-            // CloseSocket nulls the stream field, so re-reading that field after a
-            // resume dereferences null whenever a Dispose or DisconnectAsync lands
-            // mid-frame - which needs no second thread, the suspension point alone
-            // opens the window. A NullReferenceException would match neither filter
-            // below and escape raw, and a session grades it as a transport fault
-            // reading "Object reference not set to an instance of an object." for
-            // what is an ordinary shutdown. Reading through the captured reference
-            // instead throws ObjectDisposedException, which becomes the
-            // EndOfStreamException a caller can actually act on.
+            // Captured once, deliberately, and the window this closes is wide rather
+            // than narrow. UniTask's ValueTask bridge is `async UniTask<T>
+            // AsUniTask<T>(this ValueTask<T> task) => await task;` - a bare await,
+            // which captures SynchronizationContext.Current. On Unity's main thread
+            // that is UnitySynchronizationContext, so a completed read's
+            // continuation is *posted to the main-thread queue* rather than resumed
+            // inline. Everything that happens on the main thread before that queue
+            // is next drained is inside the window: a main-thread Dispose or
+            // DisconnectAsync nulls the stream field there, and a session's StopAsync
+            // is exactly that shape.
+            //
+            // Re-reading the field after such a resume dereferences null. The
+            // resulting NullReferenceException matches none of the clauses below, so
+            // it escapes raw and a session grades it as a transport fault reading
+            // "Object reference not set to an instance of an object." for what is an
+            // ordinary shutdown. Reading through the captured reference instead
+            // throws ObjectDisposedException, which becomes the EndOfStreamException
+            // a caller can act on; and a disposal landing between this method's two
+            // calls (header, then body) is caught by the null check below.
             //
             // Do NOT "fix" this by dropping the nulls in CloseSocket. Those nulls
             // are one of the two mechanisms that make a Dispose after a
@@ -207,7 +229,19 @@ namespace Echo.Harness.Infrastructure
                         .ReadAsync(new Memory<byte>(buffer, read, count - read), cancellationToken)
                         .AsUniTask();
                 }
-                catch (Exception) when (cancellationToken.IsCancellationRequested)
+                // The partition below is: cancelled -> OperationCanceledException,
+                // otherwise -> EndOfStreamException. Only the first clause is
+                // filtered, and the two after it are deliberately bare.
+                //
+                // A matching `when (!cancellationToken.IsCancellationRequested)` on
+                // them would look symmetrical and would be a bug. Exception filters
+                // run sequentially as ordinary code against the live token, with no
+                // snapshot: if the first filter reads false and cancellation is then
+                // requested before the second runs, every filter is false and the
+                // raw ObjectDisposedException escapes untranslated - a spurious
+                // transport fault, which is the exact defect the first clause exists
+                // to prevent. Bare clauses cannot miss.
+                catch (Exception failure) when (cancellationToken.IsCancellationRequested)
                 {
                     // Nothing else in this path raises OperationCanceledException.
                     // NetworkStream.ReadAsync observes its token only before the
@@ -217,14 +251,17 @@ namespace Echo.Harness.Infrastructure
                     // with the parked read faulting on ObjectDisposedException, and
                     // a session's receive pump grades that as a transport fault
                     // instead of the cancellation it actually is.
-                    throw new OperationCanceledException(cancellationToken);
+                    throw new OperationCanceledException(
+                        "The receive was cancelled while a frame was being read.",
+                        failure,
+                        cancellationToken);
                 }
-                catch (ObjectDisposedException) when (!cancellationToken.IsCancellationRequested)
+                catch (ObjectDisposedException)
                 {
                     throw new EndOfStreamException(
                         "The connection closed while a frame was being read.");
                 }
-                catch (IOException) when (!cancellationToken.IsCancellationRequested)
+                catch (IOException)
                 {
                     throw new EndOfStreamException(
                         "The connection was reset while a frame was being read.");
