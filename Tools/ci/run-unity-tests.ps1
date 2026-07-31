@@ -22,80 +22,97 @@ function ConvertFrom-NativeJson {
     ($Lines -join "`n") | ConvertFrom-Json
 }
 
-function Invoke-ConnectedUnityTests {
-    param([System.Management.Automation.CommandInfo]$UnityCli)
+$StatusPath = Join-Path $ProjectRoot 'Temp\pipeline_test_status.json'
 
-    Write-Host 'Running EditMode and PlayMode tests through the connected Unity editor...'
-    $RunOutput = & $UnityCli.Source --json command --project-path $ProjectRoot run_tests
+function Invoke-ConnectedUnityTestMode {
+    param(
+        [System.Management.Automation.CommandInfo]$UnityCli,
+        [string]$Mode
+    )
+
+    # The previous run's result stays on disk and test_status keeps serving it, so
+    # a stale "completed" from the mode that ran before this one is indistinguishable
+    # from this one's. Removing the file first makes test_status answer "no_tests"
+    # until the new run writes it, which is the whole of what makes the poll below
+    # unambiguous. This is not hypothetical: a PlayMode request issued while
+    # EditMode's result was still on disk read back EditMode's own 135 passes.
+    Remove-Item -LiteralPath $StatusPath -Force -ErrorAction SilentlyContinue
+
+    Write-Host "Running $Mode tests through the connected Unity editor..."
+
+    # --async_tests because the synchronous path is bounded by the CLI's 30 second
+    # pipeline ceiling, which neither the command's --timeout nor the global one
+    # lifts, and the EditMode suite now runs for about 30 seconds. That cost is
+    # editor ticks rather than computation: a test driving a real socket waits for
+    # the editor loop to resume each continuation, roughly 150 ms per await in a
+    # background editor, so a test making 130 sequential sends spends twenty
+    # seconds waiting. Left synchronous this fails with "Pipeline command
+    # 'run_tests' timed out after 30000ms", which reads like a hung test rather
+    # than a runner ceiling and cost one investigation already. PlayMode has no
+    # synchronous path at all - it returns an empty summary and starts nothing.
+    $RunOutput = & $UnityCli.Source --json command --project-path $ProjectRoot `
+        run_tests --mode $Mode --async_tests true
     if ($LASTEXITCODE -ne 0) {
-        throw "Unity Pipeline run_tests exited with code $LASTEXITCODE."
+        throw "Unity Pipeline run_tests ($Mode) exited with code $LASTEXITCODE."
     }
 
     $Run = ConvertFrom-NativeJson $RunOutput
     if (-not $Run.success -or -not $Run.data.success) {
-        throw "Unity Pipeline run_tests failed: $($Run.errors -join '; ')"
+        throw "Unity Pipeline run_tests ($Mode) failed: $($Run.errors -join '; ')"
     }
 
-    $EditMode = $Run.data.result.Summary
-    if ($null -eq $EditMode) {
-        throw 'Unity Pipeline did not return an EditMode summary.'
-    }
-    Write-Host "EditMode: $($EditMode.Passed)/$($EditMode.Total) passed."
-    if ([int]$EditMode.Passed -ne [int]$EditMode.Total) {
-        $Failures = @(
-            $Run.data.result.Results |
-                Where-Object Status -eq 'Failed' |
-                ForEach-Object { "$($_.FullName): $($_.Message)" }
-        )
-        throw @"
-EditMode did not pass every test: passed=$($EditMode.Passed), total=$($EditMode.Total),
-failed=$($EditMode.Failed), skipped=$($EditMode.Skipped),
-inconclusive=$($EditMode.Inconclusive).
-Failures:
- - $($Failures -join "`n - ")
-"@
-    }
-
-    $Deadline = [DateTimeOffset]::UtcNow.AddMinutes(6)
+    $Deadline = [DateTimeOffset]::UtcNow.AddMinutes(15)
     do {
         if ([DateTimeOffset]::UtcNow -ge $Deadline) {
-            throw 'Timed out waiting for Unity PlayMode tests.'
+            throw "Timed out waiting for Unity $Mode tests."
         }
 
         Start-Sleep -Milliseconds 500
         $StatusOutput = & $UnityCli.Source --json command --project-path $ProjectRoot test_status
         if ($LASTEXITCODE -ne 0) {
-            throw "Unity Pipeline test_status exited with code $LASTEXITCODE."
+            throw "Unity Pipeline test_status ($Mode) exited with code $LASTEXITCODE."
         }
 
         $StatusEnvelope = ConvertFrom-NativeJson $StatusOutput
         if (-not $StatusEnvelope.success -or -not $StatusEnvelope.data.success) {
-            throw "Unity Pipeline test_status failed: $($StatusEnvelope.errors -join '; ')"
+            throw "Unity Pipeline test_status ($Mode) failed: $($StatusEnvelope.errors -join '; ')"
         }
-        $PlayMode = $StatusEnvelope.data.result | ConvertFrom-Json
-    } while ($PlayMode.status -ne 'completed')
+        $Status = $StatusEnvelope.data.result | ConvertFrom-Json
+    } while ($Status.status -ne 'completed')
 
-    Write-Host "PlayMode: $($PlayMode.summary.passed)/$($PlayMode.summary.total) passed."
-    if ([int]$PlayMode.summary.passed -ne [int]$PlayMode.summary.total) {
+    Write-Host "$($Mode): $($Status.summary.passed)/$($Status.summary.total) passed."
+    if ([int]$Status.summary.passed -ne [int]$Status.summary.total) {
         $Failures = @(
-            $PlayMode.results |
+            $Status.results |
                 Where-Object Status -eq 'Failed' |
                 ForEach-Object { "$($_.FullName): $($_.Message)" }
         )
         throw @"
-PlayMode did not pass every test: passed=$($PlayMode.summary.passed),
-total=$($PlayMode.summary.total), failed=$($PlayMode.summary.failed),
-skipped=$($PlayMode.summary.skipped),
-inconclusive=$($PlayMode.summary.inconclusive).
+$Mode did not pass every test: passed=$($Status.summary.passed),
+total=$($Status.summary.total), failed=$($Status.summary.failed),
+skipped=$($Status.summary.skipped),
+inconclusive=$($Status.summary.inconclusive).
 Failures:
  - $($Failures -join "`n - ")
 "@
     }
 
+    return $Status.summary
+}
+
+function Invoke-ConnectedUnityTests {
+    param([System.Management.Automation.CommandInfo]$UnityCli)
+
+    # Sequential, not one combined run_tests call. The combined form runs EditMode
+    # synchronously, which is what hit the ceiling described above, and both modes
+    # share a single status file so they cannot be polled concurrently anyway.
+    $EditMode = Invoke-ConnectedUnityTestMode $UnityCli 'EditMode'
+    $PlayMode = Invoke-ConnectedUnityTestMode $UnityCli 'PlayMode'
+
     $Result = [ordered]@{
         runner = 'connected-editor'
         editMode = $EditMode
-        playMode = $PlayMode.summary
+        playMode = $PlayMode
     }
     $Result | ConvertTo-Json -Depth 8 |
         Set-Content -LiteralPath (Join-Path $ArtifactsDirectory 'unity-test-summary.json') `
