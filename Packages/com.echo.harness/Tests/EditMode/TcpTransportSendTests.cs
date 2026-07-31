@@ -1,6 +1,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -234,6 +237,265 @@ namespace Echo.Harness.Tests.EditMode
                 Assert.That(failure, Is.InstanceOf<ArgumentOutOfRangeException>());
                 Assert.That(transport.State, Is.EqualTo(TransportState.Connected));
             });
+        }
+
+        /// <summary>
+        /// A local disposal while a write is outstanding must read as end of stream,
+        /// the same way DisposingMidFrameFailsTheReceiveCleanly pins it for the read
+        /// path. Untranslated the failure escapes raw and a session grades an
+        /// ordinary shutdown as a transport fault.
+        ///
+        /// What escapes here was measured, and it is not what the read path sees. A
+        /// parked read broken by a local Dispose surfaces as ObjectDisposedException;
+        /// a parked write broken by the same Dispose surfaces as a bare IOException
+        /// on this runtime, so it is the IOException clause that catches this, not
+        /// the ObjectDisposedException one. Both land on EndOfStreamException, which
+        /// is the whole point of translating them together.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator DisposingMidSendFailsTheSendCleanly()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var peer = new SilentPeer();
+                using var transport = await ConnectAsync(peer);
+
+                var sending = await ParkedSendAsync(transport, CancellationToken.None);
+
+                transport.Dispose();
+
+                var failure = await CaptureAsync(async () => await sending.Timeout(Patience));
+                Assert.That(failure, Is.InstanceOf<EndOfStreamException>(),
+                    "A disposal mid-write must read as end of stream. A bare " +
+                    "IOException is an IOException too, so only the translation " +
+                    "satisfies this.");
+            });
+        }
+
+        /// <summary>
+        /// The far end vanishing mid-write, rather than the near end being disposed.
+        /// Both arrive as IOException on this runtime and both must land on
+        /// EndOfStreamException, but they are separate routes into the send path and
+        /// a translation that covered only one of them would still let a session
+        /// fault on the other.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator AResetMidSendFailsTheSendCleanly()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var peer = new SilentPeer();
+                using var transport = await ConnectAsync(peer);
+
+                var sending = await ParkedSendAsync(transport, CancellationToken.None);
+
+                peer.Reset();
+
+                var failure = await CaptureAsync(async () => await sending.Timeout(Patience));
+                Assert.That(failure, Is.InstanceOf<EndOfStreamException>(),
+                    "A reset mid-write must read as end of stream. A bare IOException " +
+                    "is an IOException too, so this assertion is only satisfied by " +
+                    "the translation.");
+            });
+        }
+
+        /// <summary>
+        /// A cancelled send must surface as cancellation, not as the mechanism that
+        /// happened to end the write.
+        ///
+        /// The disposal after the cancel is not incidental. A parked
+        /// NetworkStream.WriteAsync observes no token, so cancelling alone leaves it
+        /// parked and only closing the socket under it ends the wait - which is the
+        /// same CancelPump-then-Disconnect order a session's StopAsync runs. Without
+        /// the translation that shutdown surfaces as a bare IOException and the
+        /// session faults while it was stopping cleanly.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator CancellingMidSendIsReportedAsCancellation()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var peer = new SilentPeer();
+                using var transport = await ConnectAsync(peer);
+
+                using var cancellation = new CancellationTokenSource();
+                var sending = await ParkedSendAsync(transport, cancellation.Token);
+
+                cancellation.Cancel();
+                transport.Dispose();
+
+                var failure = await CaptureAsync(async () => await sending.Timeout(Patience));
+                Assert.That(failure, Is.InstanceOf<OperationCanceledException>(),
+                    "Cancelling a send must not be reported as a broken link.");
+            });
+        }
+
+        /// <summary>
+        /// Returns a send that is genuinely still outstanding, by writing
+        /// maximum-sized frames one at a time until one fails to complete.
+        ///
+        /// One frame is not enough, and that was measured rather than assumed: a
+        /// single 1 MiB write at a peer that never reads still completed, so this
+        /// runtime absorbs at least that much between the sender's buffer and the
+        /// receiver's window. Frames are sent one at a time rather than in a batch
+        /// because the send gate serializes them - a batch leaves every sender but
+        /// one parked in WaitAsync rather than in the write, and a sender that never
+        /// reached the stream fails on the null-stream guard instead, which already
+        /// throws EndOfStreamException and would satisfy these assertions with no
+        /// translation in place at all.
+        ///
+        /// The assertion at the end is what keeps these tests honest: without a
+        /// parked write there is nothing here to translate.
+        /// </summary>
+        private static async UniTask<UniTask> ParkedSendAsync(
+            TcpTransport transport,
+            CancellationToken cancellationToken)
+        {
+            var body = BodyOf(WireFrameSpec.MaxPayloadBytes);
+            for (var attempt = 0; attempt < SendsBeforeGivingUpOnParking; attempt++)
+            {
+                var sending = transport.SendAsync(
+                    new TransportMessage(MessageId.PhaseChangeEvent, body),
+                    cancellationToken);
+                // 300 ms, not 100. A completed write's continuation is posted to the
+                // main-thread queue rather than resumed inline, so a status read
+                // taken before that queue is drained reports Pending for a write
+                // that has already finished - and every one of these tests would
+                // then be acting on a send that was never outstanding. A 250 ms
+                // settle was measured as enough for the queue to drain in this
+                // fixture; this leaves margin on top of it.
+                await UniTask.Delay(TimeSpan.FromMilliseconds(300), DelayType.Realtime);
+                if (sending.Status == UniTaskStatus.Pending)
+                {
+                    return sending;
+                }
+
+                await sending;
+            }
+
+            Assert.Fail(
+                $"No write was still outstanding after {SendsBeforeGivingUpOnParking} " +
+                "frames of " + WireFrameSpec.MaxPayloadBytes + " bytes at a peer that " +
+                "never reads. Without a parked write these tests prove nothing, so " +
+                "this is a failure rather than a skip.");
+            return UniTask.CompletedTask;
+        }
+
+        /// <summary>
+        /// Enough frames to overflow whatever this runtime buffers, bounded so a
+        /// platform that buffers without limit fails the test instead of writing
+        /// until the suite times out. Each frame is 1 MiB, so this is a 32 MiB
+        /// ceiling.
+        /// </summary>
+        private const int SendsBeforeGivingUpOnParking = 32;
+
+        private static async UniTask<TcpTransport> ConnectAsync(SilentPeer peer)
+        {
+            var transport = new TcpTransport(
+                new TcpTransportOptions
+                {
+                    Host = "127.0.0.1",
+                    Port = peer.Port,
+
+                    // High enough that filling the peer's buffers never runs out of
+                    // budget: the clock is manual and never advances, so the window
+                    // never resets and every frame above counts against this one
+                    // allowance.
+                    SendBudgetPerSecond = SendsBeforeGivingUpOnParking + 8
+                },
+                new ManualClock(DateTimeOffset.UnixEpoch));
+            try
+            {
+                var connecting = transport.ConnectAsync(CancellationToken.None);
+                await peer.AcceptAsync(Patience);
+                await connecting;
+            }
+            catch (Exception)
+            {
+                // A half-built transport still owns a socket, and a leaked socket
+                // stalls the editor at domain reload.
+                transport.Dispose();
+                throw;
+            }
+
+            return transport;
+        }
+
+        /// <summary>
+        /// Accepts one connection and never reads a byte from it, so a large write
+        /// parks instead of completing. LoopbackProtocolServer cannot stand in here:
+        /// its AcceptAsync starts a reader thread that drains everything sent to it,
+        /// which is exactly what has to not happen for a write to stay outstanding.
+        /// </summary>
+        private sealed class SilentPeer : IDisposable
+        {
+            private readonly TcpListener listener;
+            private TcpClient connection;
+
+            public SilentPeer()
+            {
+                listener = new TcpListener(IPAddress.Loopback, 0);
+
+                // Set on the listening socket rather than the accepted one, because
+                // accepted sockets inherit it and the receive window is already
+                // negotiated by the time a connection can be touched. A small window
+                // is what makes the sender run out of room in a few frames instead of
+                // dozens.
+                listener.Server.SetSocketOption(
+                    SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 1024);
+                listener.Start();
+                Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            }
+
+            public int Port { get; }
+
+            public async UniTask AcceptAsync(TimeSpan timeout)
+            {
+                var accept = listener.AcceptTcpClientAsync();
+
+                // The UniTask.WhenAny overload taking a UniTask<T> and a plain
+                // UniTask reports the winner as a bool: true means the accept won.
+                var (accepted, _) = await UniTask.WhenAny(
+                    accept.AsUniTask(), UniTask.Delay(timeout, DelayType.Realtime));
+                if (!accepted)
+                {
+                    throw new TimeoutException($"No client connected within {timeout}.");
+                }
+
+                connection = accept.Result;
+            }
+
+            /// <summary>
+            /// An abortive close, not a graceful one. A zero linger makes the peer
+            /// answer with RST at once; a graceful close would only half-close it and
+            /// leave the outstanding write sitting in the send buffer.
+            /// </summary>
+            public void Reset()
+            {
+                connection.LingerState = new LingerOption(true, 0);
+                connection.Close();
+            }
+
+            public void Dispose()
+            {
+                try
+                {
+                    connection?.Close();
+                }
+                catch (Exception)
+                {
+                    // Already closed by Reset.
+                }
+
+                try
+                {
+                    listener.Stop();
+                }
+                catch (Exception)
+                {
+                    // Already stopped.
+                }
+            }
         }
 
         /// <summary>

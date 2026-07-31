@@ -22,14 +22,16 @@ namespace Echo.Harness.Infrastructure
         // CloseSocket wrote, and ThrowIfDisposed must see a concurrent Dispose.
         //
         // State belongs to this same set - written by ConnectAsync, DisconnectAsync
-        // and Dispose, read by EnsureConnected next to stream - and is not volatile
-        // only because it is an auto-property and the modifier is not legal on one.
-        // Converting it to a backing field would buy the same visibility; it is left
-        // alone because nothing today races on it in a way the stream null check
-        // does not already cover, not because it is in a different category.
+        // and Dispose, read by EnsureConnected next to stream. It used to be an
+        // auto-property, where the modifier is not legal, and the note here said it
+        // was left alone because nothing raced on it. That is no longer true: the
+        // read-idle deadline's registration writes it from a timer thread, so it is
+        // now a backing field for the same reason as the three above and the
+        // property is a read-only view onto it.
         private volatile TcpClient client;
         private volatile NetworkStream stream;
         private volatile bool disposed;
+        private volatile TransportState state = TransportState.Disconnected;
 
         // WHY THIS EXISTS - read before deleting it. The one test written to catch
         // interleaving, ConcurrentSendsArriveAsWholeFrames, still passes with this
@@ -81,9 +83,23 @@ namespace Echo.Harness.Infrastructure
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
             this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+
+            // Rejected here, where the option can still be named. The deadline is
+            // built on CancelAfter, which throws ArgumentOutOfRangeException on a
+            // negative TimeSpan and treats zero as "now" - so an unguarded value
+            // surfaces from deep inside a receive as either a bare argument fault
+            // naming nothing that led to it, or a link that dies on its first frame
+            // for no stated reason.
+            if (this.options.ReadIdleTimeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(options),
+                    this.options.ReadIdleTimeout,
+                    "ReadIdleTimeout must be positive.");
+            }
         }
 
-        public TransportState State { get; private set; } = TransportState.Disconnected;
+        public TransportState State => state;
 
         public async UniTask ConnectAsync(CancellationToken cancellationToken)
         {
@@ -94,7 +110,7 @@ namespace Echo.Harness.Infrastructure
                     $"This transport is {State} and cannot be connected again.");
             }
 
-            State = TransportState.Connecting;
+            state = TransportState.Connecting;
             var connecting = new TcpClient { NoDelay = true };
 
             // .NET Standard 2.1 has no TcpClient.ConnectAsync overload taking a
@@ -118,7 +134,7 @@ namespace Echo.Harness.Infrastructure
                 // the unretryable stuck state this method exists to prevent.
                 client = connecting;
                 stream = connecting.GetStream();
-                State = TransportState.Connected;
+                state = TransportState.Connected;
             }
             catch (Exception failure) when (cancellationToken.IsCancellationRequested)
             {
@@ -151,7 +167,7 @@ namespace Echo.Harness.Infrastructure
             client = null;
             stream = null;
             budget = null;
-            State = TransportState.Disconnected;
+            state = TransportState.Disconnected;
 
             try
             {
@@ -216,13 +232,49 @@ namespace Echo.Harness.Infrastructure
                         "faster than the protocol allows is a defect worth surfacing.");
                 }
 
-                // One write for the whole frame. BinaryFrameCodec.Encode returns the
-                // header and body in a single buffer for exactly this reason, and
-                // the server merges them in its EncodeFrame for the same one.
-                await active
-                    .WriteAsync(new ReadOnlyMemory<byte>(frame), cancellationToken)
-                    .AsUniTask();
-                await active.FlushAsync(cancellationToken).AsUniTask();
+                // The two awaits are wrapped, not the whole gate body, and that
+                // boundary is load-bearing in both directions. The null-stream guard
+                // above throws EndOfStreamException, which derives from IOException,
+                // so a catch spanning the body would re-wrap the guard's own
+                // exception; and SendBudgetExceededException is an
+                // InvalidOperationException that has to escape untouched, because a
+                // caller sending faster than the protocol allows is a defect rather
+                // than a link failure.
+                try
+                {
+                    // One write for the whole frame. BinaryFrameCodec.Encode returns
+                    // the header and body in a single buffer for exactly this
+                    // reason, and the server merges them in its EncodeFrame for the
+                    // same one.
+                    await active
+                        .WriteAsync(new ReadOnlyMemory<byte>(frame), cancellationToken)
+                        .AsUniTask();
+                    await active.FlushAsync(cancellationToken).AsUniTask();
+                }
+                // The same partition as ReadExactlyAsync's, and bare on the same two
+                // trailing clauses for the reason spelled out there. Do not make them
+                // symmetrical.
+                //
+                // Untranslated, a disposal or a reset during a write escapes raw and
+                // a session grades an ordinary shutdown as a transport fault - the
+                // same defect the receive path already fixed.
+                catch (Exception failure) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(
+                        "The send was cancelled while a frame was being written.",
+                        failure,
+                        cancellationToken);
+                }
+                catch (ObjectDisposedException)
+                {
+                    throw new EndOfStreamException(
+                        "The connection closed while a frame was being written.");
+                }
+                catch (IOException)
+                {
+                    throw new EndOfStreamException(
+                        "The connection was reset while a frame was being written.");
+                }
             }
             finally
             {
@@ -235,6 +287,86 @@ namespace Echo.Harness.Infrastructure
             ThrowIfDisposed();
             EnsureConnected();
 
+            // The deadline covers one whole frame and restarts with the next, so a
+            // healthy but quiet link is not killed by the sum of its gaps. The
+            // server sends a Ping every 15 s, which is what makes silence
+            // measurable at all.
+            //
+            // Real time, not the injected IClock. CancelAfter runs off a timer and
+            // there is nothing to drive a virtual clock against a real socket, so
+            // this deliberately does not use `clock`. Do not "fix" that.
+            using var deadline =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            // Declared after the source so the two using declarations dispose in
+            // reverse and this registration goes first. A registration outliving its
+            // source is an ordering bug waiting to bite.
+            using var closing = deadline.Token.Register(AbandonTheLink);
+
+            // Registered before the timer is armed, so a very short timeout cannot
+            // fire into a token that has no callback on it yet.
+            deadline.CancelAfter(options.ReadIdleTimeout);
+
+            try
+            {
+                return await ReceiveFrameAsync(deadline.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Only the deadline fired. A caller's own cancellation passes
+                // through untouched, because reporting it as a dead link would
+                // send a session into Faulted during an orderly shutdown.
+                throw new ReadIdleTimeoutException(
+                    options.ReadIdleTimeout,
+                    $"No complete frame arrived within {options.ReadIdleTimeout}. The " +
+                    "server sends a Ping every 15 seconds, so this much silence means " +
+                    "the link is gone even though the socket has not said so.");
+            }
+        }
+
+        /// <summary>
+        /// Ends the link when the idle deadline fires, or when the caller cancels a
+        /// receive that is already parked.
+        ///
+        /// Closing the socket is the load-bearing half, and cancelling alone is not
+        /// enough. That was measured on this runtime rather than reasoned about:
+        /// with CancelAfter and no close, the deadline fired against a silent peer
+        /// and the parked read never returned - the receive hung until the test's
+        /// own ceiling. It confirms the note at ReadExactlyAsync's cancellation
+        /// clause that a parked NetworkStream.ReadAsync observes no token and only
+        /// the socket closing under it ends the wait.
+        ///
+        /// The cancellation is still what routes the exception. Closing without
+        /// cancelling would make ReadExactlyAsync produce EndOfStreamException,
+        /// indistinguishable from an ordinary peer close; under the cancelled
+        /// deadline token its first catch filter matches instead and it produces the
+        /// OperationCanceledException that ReceiveAsync translates.
+        ///
+        /// This runs on a thread-pool thread, because CancelAfter uses a timer, and
+        /// so it races the main-thread reader. That is deliberate: it is the same
+        /// race Dispose already runs, and CloseSocket already tolerates it.
+        ///
+        /// State goes to Disconnected rather than being left at Connected with a
+        /// null stream. Both leave every later call throwing - EnsureConnected
+        /// covers the null stream - but a transport that has just closed its own
+        /// socket and still reports Connected is lying to whoever asks, and the
+        /// session's next step either way is to tear the connection down.
+        ///
+        /// Closing on a caller's cancellation too, not only on the deadline, because
+        /// the token is linked and a cancelled receive is in exactly the same
+        /// position: its read is parked and nothing else will ever end it.
+        /// Cancelling the pump and then disconnecting is already what a session's
+        /// StopAsync does; this only makes the disconnect immediate.
+        /// </summary>
+        private void AbandonTheLink()
+        {
+            state = TransportState.Disconnected;
+            CloseSocket();
+        }
+
+        private async UniTask<TransportMessage> ReceiveFrameAsync(
+            CancellationToken cancellationToken)
+        {
             await ReadExactlyAsync(header, header.Length, cancellationToken);
 
             var declaredLength = (header[0] << 24) | (header[1] << 16) |
@@ -272,7 +404,7 @@ namespace Echo.Harness.Infrastructure
                 return UniTask.CompletedTask;
             }
 
-            State = TransportState.Disconnected;
+            state = TransportState.Disconnected;
             CloseSocket();
             return UniTask.CompletedTask;
         }
@@ -285,7 +417,7 @@ namespace Echo.Harness.Infrastructure
             }
 
             disposed = true;
-            State = TransportState.Disconnected;
+            state = TransportState.Disconnected;
             CloseSocket();
         }
 
@@ -432,5 +564,22 @@ namespace Echo.Harness.Infrastructure
                 throw new ObjectDisposedException(nameof(TcpTransport));
             }
         }
+    }
+
+    /// <summary>
+    /// No complete frame arrived within the idle window. Derived from IOException
+    /// because that is what the session already grades as a desynchronized stream,
+    /// and a link the kernel has not yet noticed is dead deserves the same
+    /// treatment.
+    /// </summary>
+    public sealed class ReadIdleTimeoutException : IOException
+    {
+        public ReadIdleTimeoutException(TimeSpan idle, string message)
+            : base(message)
+        {
+            Idle = idle;
+        }
+
+        public TimeSpan Idle { get; }
     }
 }
