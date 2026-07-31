@@ -31,13 +31,13 @@ namespace Echo.Harness.Infrastructure
         private volatile NetworkStream stream;
         private volatile bool disposed;
 
-        // WHY THIS EXISTS - read before deleting it. The whole test suite stays
-        // green with this gate removed; that is a measured fact, not a guess, and
-        // it is not evidence the gate is unnecessary. Byte-level interleaving
-        // could not be provoked on this platform and runtime at any size tried,
-        // up to 64 concurrent senders of 1,000,000 bytes, because something
-        // beneath us serializes the overlapped sends. Three reasons stand
-        // independently of that:
+        // WHY THIS EXISTS - read before deleting it. The one test written to catch
+        // interleaving, ConcurrentSendsArriveAsWholeFrames, still passes with this
+        // gate removed; that was measured deliberately, and it is not evidence the
+        // gate is unnecessary. Byte-level interleaving could not be provoked on
+        // this platform and runtime at any size tried, up to 64 concurrent senders
+        // of 1,000,000 bytes, because something beneath us serializes the
+        // overlapped sends. Three reasons stand independently of that:
         //
         //   1. NetworkStream does not support concurrent writes by contract. What
         //      the platform does today is not what the API promises.
@@ -45,9 +45,11 @@ namespace Echo.Harness.Infrastructure
         //      any of the mobile targets may - interleaves two callers' frames
         //      and desynchronizes the stream. The server then reads a garbage
         //      length prefix and closes without an error frame.
-        //   3. SendBudget.TryConsume is a read-modify-write over a plain int and
-        //      is not thread-safe on its own. This gate is the whole of what
-        //      makes it safe, and it is what keeps tokens in wire order.
+        //   3. SendBudget.TryConsume is a read-modify-write over an int and a
+        //      DateTimeOffset, and is not thread-safe on its own. The second is
+        //      the more dangerous half - it is wide enough to tear. This gate is
+        //      the whole of what makes it safe, and it is what keeps tokens in
+        //      wire order.
         //
         // Deliberately never disposed. SemaphoreSlim.Dispose does not release
         // waiters, so a sender parked in WaitAsync when Dispose ran would never be
@@ -66,10 +68,13 @@ namespace Echo.Harness.Infrastructure
         // Today every caller reaches SendAsync on the main thread and UniTask
         // binds each resume back to it, so no cross-thread read is demonstrable
         // and this modifier cannot be shown to change the generated behaviour.
-        // It is kept as the cheaper half of a bet: the field is published by one
-        // method and consumed by another that suspends three times in between,
-        // and Task 8 replaces the scheduler that currently guarantees the
-        // confinement. Do not read the modifier as proof a race exists.
+        // It is kept because it costs nothing and because the confinement it
+        // would otherwise rely on is not this class's to enforce or even to
+        // observe: it falls out of Task.AsUniTask binding continuations through
+        // TaskScheduler.FromCurrentSynchronizationContext, which is a property of
+        // a third-party library. One await - the gate wait - separates the write
+        // in ConnectAsync from the read in SendAsync. Do not read the modifier as
+        // proof a race exists.
         private volatile SendBudget budget;
 
         public TcpTransport(TcpTransportOptions options, IClock clock)

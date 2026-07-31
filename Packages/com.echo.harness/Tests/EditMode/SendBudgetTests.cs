@@ -63,6 +63,24 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         [Test]
+        public void ARateFinerThanOneTickPerMessageIsRejected()
+        {
+            // One tick per message is the finest interval that can be measured, so
+            // it is allowed and the next value up is not. Rejected in the
+            // constructor rather than left to TryConsume, where the truncated
+            // interval would be zero and the refill would divide by it - surfacing
+            // as a DivideByZeroException on the first send, naming nothing that
+            // led to it.
+            Assert.DoesNotThrow(() => new SendBudget(
+                (int)TimeSpan.TicksPerSecond, new ManualClock(DateTimeOffset.UnixEpoch)));
+
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => new SendBudget(
+                    (int)TimeSpan.TicksPerSecond + 1,
+                    new ManualClock(DateTimeOffset.UnixEpoch)));
+        }
+
+        [Test]
         public void ANullClockIsRejected()
         {
             Assert.Throws<ArgumentNullException>(() => new SendBudget(30, null));

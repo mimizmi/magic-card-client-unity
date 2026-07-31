@@ -124,8 +124,94 @@ Failures:
     return $Status.summary
 }
 
+function Wait-ForUnityCompile {
+    param([System.Management.Automation.CommandInfo]$UnityCli)
+
+    # Run before any test request, because the test list is enumerated from the
+    # assemblies as they are at that moment. An editor that has not yet rebuilt
+    # after a source edit answers with the OLD list, and the run passes against
+    # code that was never compiled - the gate reporting success on work it did not
+    # test. This is not hypothetical: adding one test to SendBudgetTests and
+    # running verify.ps1 reported 135/135, the count from before the edit; the
+    # identical run immediately afterwards reported 136/136.
+    #
+    # --focus is not passed: the editor is usually unfocused or minimised here and
+    # stealing focus mid-run is worse than waiting.
+    $CompileOutput = & $UnityCli.Source --json command --project-path $ProjectRoot recompile
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unity Pipeline recompile exited with code $LASTEXITCODE."
+    }
+
+    $CompileEnvelope = ConvertFrom-NativeJson $CompileOutput
+    if (-not $CompileEnvelope.success -or -not $CompileEnvelope.data.success) {
+        throw "Unity Pipeline recompile failed: $($CompileEnvelope.errors -join '; ')"
+    }
+
+    # The decision to wait is taken from the response to the command that triggers
+    # the compile, never from a following recompile_status read. That read is
+    # racy: issued before the editor has begun, it answers with the PREVIOUS
+    # run's "up_to_date" and the wait returns immediately - which put the domain
+    # reload inside the next run_tests call, where it exceeded that command's own
+    # 30 second dispatch timeout and failed the gate with exit code 6.
+    if ($CompileEnvelope.data.result.status -eq 'up_to_date') {
+        return
+    }
+
+    Write-Host 'Waiting for Unity to finish recompiling...'
+
+    # editor_status, not recompile_status, is what the wait turns on. Compilation
+    # finishing is not the same event as the editor being usable again: the domain
+    # reload that follows it tears down and re-registers the pipeline server, and a
+    # run_tests dispatched into that window waits out its own 30 second timeout and
+    # fails the gate with exit code 6. recompile_status reported "completed"
+    # through exactly that window. editor_status distinguishes the two, so the
+    # wait ends only when the editor says it is ready, not compiling, and not
+    # mid-reload.
+    $Deadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
+    do {
+        Start-Sleep -Milliseconds 500
+
+        $StatusOutput = & $UnityCli.Source --json command --project-path $ProjectRoot editor_status
+        if ($LASTEXITCODE -ne 0) {
+            # The editor is unreachable while the domain reloads, which is the
+            # condition being waited out rather than a failure to report.
+            continue
+        }
+
+        $Envelope = ConvertFrom-NativeJson $StatusOutput
+        if ($Envelope.success -and $Envelope.data.success) {
+            $Editor = $Envelope.data.result
+            if ($Editor.status -eq 'ready' -and
+                -not $Editor.compiling -and
+                -not $Editor.domainReloadInProgress) {
+                break
+            }
+        }
+
+        if ([DateTimeOffset]::UtcNow -ge $Deadline) {
+            throw 'Timed out waiting for Unity to finish compiling and reloading.'
+        }
+    } while ($true)
+
+    # Read after the editor settles, not during. A compile that finished with
+    # errors is reported here as compile errors rather than as whatever the stale
+    # test list happens to do next.
+    $CompileStatusOutput = & $UnityCli.Source --json command --project-path $ProjectRoot recompile_status
+    if ($LASTEXITCODE -eq 0) {
+        $CompileStatus = (ConvertFrom-NativeJson $CompileStatusOutput).data.result | ConvertFrom-Json
+        if ($CompileStatus.failed) {
+            throw @"
+Unity scripts failed to compile:
+ - $($CompileStatus.errors -join "`n - ")
+"@
+        }
+    }
+}
+
 function Invoke-ConnectedUnityTests {
     param([System.Management.Automation.CommandInfo]$UnityCli)
+
+    Wait-ForUnityCompile $UnityCli
 
     # Sequential, not one combined run_tests call. The combined form runs EditMode
     # synchronously, which is what hit the ceiling described above, and both modes
