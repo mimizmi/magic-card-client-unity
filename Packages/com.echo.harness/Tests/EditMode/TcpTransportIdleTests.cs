@@ -83,6 +83,10 @@ namespace Echo.Harness.Tests.EditMode
                 Assert.That(failure, Is.InstanceOf<IOException>(),
                     "The session grades an IOException from the receive as fatal, " +
                     "which is the treatment a dead link deserves.");
+                Assert.That(transport.State, Is.EqualTo(TransportState.Disconnected),
+                    "The deadline closed the socket itself, so a transport still " +
+                    "reporting Connected would be lying about a link it had just " +
+                    "killed.");
             });
         }
 
