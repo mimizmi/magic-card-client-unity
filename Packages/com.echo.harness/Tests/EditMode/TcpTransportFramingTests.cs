@@ -152,6 +152,50 @@ namespace Echo.Harness.Tests.EditMode
             });
         }
 
+        /// <summary>
+        /// Disposing the transport while a frame is half-read must surface as
+        /// EndOfStreamException. This is the local-dispose path, distinct from
+        /// ACloseMidBodyFailsTheReceive above, which closes the far end instead.
+        ///
+        /// Read the scope of this test honestly: it does NOT pin I1, the
+        /// capture-once fix in ReadExactlyAsync. It was written for that and does
+        /// not achieve it - verified by reverting the fix, against which this test
+        /// still passes. By the time Dispose runs here the reader is already parked
+        /// inside ReadAsync, so the stream field was dereferenced before it was
+        /// nulled and the disposal arrives as ObjectDisposedException either way.
+        /// I1's window is the instant between an I/O completion and the next
+        /// dereference, both of which run inside the async continuation on the
+        /// thread pool, and a test driving the socket from the main thread cannot
+        /// deterministically land a Dispose inside it. A racing attempt would be
+        /// flaky, which is worse than absent.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator DisposingMidFrameFailsTheReceiveCleanly()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = await ConnectAsync(server);
+
+                var receiving = transport.ReceiveAsync(CancellationToken.None);
+                var frame = BinaryFrameCodec.Encode(
+                    MessageId.PhaseChangeEvent,
+                    Encoding.UTF8.GetBytes("{\"phase\":\"action\"}"));
+
+                // A whole header plus part of the body, so the reader consumes the
+                // header, takes a short first chunk, and loops for the remainder.
+                server.SendBytes(Slice(frame, 0, 6));
+                server.SendBytes(Slice(frame, 6, 4));
+                await UniTask.Delay(TimeSpan.FromMilliseconds(250), DelayType.Realtime);
+
+                transport.Dispose();
+
+                var failure = await CaptureAsync(async () => await receiving.Timeout(Patience));
+                Assert.That(failure, Is.InstanceOf<EndOfStreamException>(),
+                    "A disposal mid-frame must read as end of stream.");
+            });
+        }
+
         [UnityTest]
         public IEnumerator ConnectingToAClosedPortFails()
         {
@@ -188,7 +232,13 @@ namespace Echo.Harness.Tests.EditMode
 
                 var failure = await CaptureAsync(async () =>
                     await transport.ConnectAsync(cancellation.Token).Timeout(Patience));
-                Assert.That(failure, Is.InstanceOf<OperationCanceledException>());
+
+                // The exact type, not Is.InstanceOf: TaskCanceledException derives
+                // from OperationCanceledException, so InstanceOf would accept one
+                // leaking out of the framework and stop distinguishing it from the
+                // deliberate translation in ConnectAsync - which is the whole point
+                // of this test.
+                Assert.That(failure, Is.TypeOf<OperationCanceledException>());
                 Assert.That(transport.State, Is.EqualTo(TransportState.Disconnected),
                     "A transport stuck in Connecting can never be retried.");
             });

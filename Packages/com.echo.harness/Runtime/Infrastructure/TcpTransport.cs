@@ -15,9 +15,14 @@ namespace Echo.Harness.Infrastructure
         private readonly byte[] header =
             new byte[WireFrameSpec.LengthPrefixBytes + WireFrameSpec.MessageIdBytes];
 
-        private TcpClient client;
-        private NetworkStream stream;
-        private bool disposed;
+        // volatile because these are read and written from different threads
+        // without a lock: socket I/O completes on the thread pool while Dispose or
+        // DisconnectAsync can run on the session's context. The capture in
+        // ReadExactlyAsync depends on seeing a current value rather than one the
+        // jitter cached in a register across the loop.
+        private volatile TcpClient client;
+        private volatile NetworkStream stream;
+        private volatile bool disposed;
 
         public TcpTransport(TcpTransportOptions options, IClock clock)
         {
@@ -47,25 +52,50 @@ namespace Echo.Harness.Infrastructure
             try
             {
                 await connecting.ConnectAsync(options.Host, options.Port).AsUniTask();
+
+                // Inside the try, not after it. Cancellation can fire between a
+                // successful connect and the registration being disposed, and the
+                // callback closes the client - so GetStream() here can throw. Left
+                // outside, that would escape with State still Connecting: exactly
+                // the unretryable stuck state this method exists to prevent.
+                client = connecting;
+                stream = connecting.GetStream();
+                State = TransportState.Connected;
             }
             catch (Exception) when (cancellationToken.IsCancellationRequested)
             {
-                connecting.Dispose();
-                State = TransportState.Disconnected;
+                AbandonConnect(connecting);
                 throw new OperationCanceledException(cancellationToken);
             }
             catch (Exception)
             {
                 // Reset rather than left in Connecting: a transport stuck there
                 // refuses every later ConnectAsync and can never be retried.
-                connecting.Dispose();
-                State = TransportState.Disconnected;
+                AbandonConnect(connecting);
                 throw;
             }
+        }
 
-            client = connecting;
-            stream = connecting.GetStream();
-            State = TransportState.Connected;
+        /// <summary>
+        /// Undoes a partial connect. The fields are cleared as well as the socket
+        /// closed because the assignments now sit inside the try: a failure in
+        /// GetStream leaves client assigned and stream still null, and a transport
+        /// that reports Disconnected must not keep a live handle behind it.
+        /// </summary>
+        private void AbandonConnect(TcpClient connecting)
+        {
+            client = null;
+            stream = null;
+            State = TransportState.Disconnected;
+
+            try
+            {
+                connecting.Dispose();
+            }
+            catch (Exception)
+            {
+                // Already closed by the cancellation callback.
+            }
         }
 
         public UniTask SendAsync(TransportMessage message, CancellationToken cancellationToken)
@@ -143,15 +173,51 @@ namespace Echo.Harness.Infrastructure
             int count,
             CancellationToken cancellationToken)
         {
+            // Captured once, deliberately. This loop suspends at every await, and
+            // CloseSocket nulls the stream field, so re-reading that field after a
+            // resume dereferences null whenever a Dispose or DisconnectAsync lands
+            // mid-frame - which needs no second thread, the suspension point alone
+            // opens the window. A NullReferenceException would match neither filter
+            // below and escape raw, and a session grades it as a transport fault
+            // reading "Object reference not set to an instance of an object." for
+            // what is an ordinary shutdown. Reading through the captured reference
+            // instead throws ObjectDisposedException, which becomes the
+            // EndOfStreamException a caller can actually act on.
+            //
+            // Do NOT "fix" this by dropping the nulls in CloseSocket. Those nulls
+            // are one of the two mechanisms that make a Dispose after a
+            // DisconnectAsync a no-op rather than a second close on an already
+            // disposed TcpClient.
+            var active = stream;
+            if (active == null)
+            {
+                throw new EndOfStreamException(
+                    "The connection closed while a frame was being read.");
+            }
+
             var read = 0;
             while (read < count)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 int chunk;
                 try
                 {
-                    chunk = await stream
+                    chunk = await active
                         .ReadAsync(new Memory<byte>(buffer, read, count - read), cancellationToken)
                         .AsUniTask();
+                }
+                catch (Exception) when (cancellationToken.IsCancellationRequested)
+                {
+                    // Nothing else in this path raises OperationCanceledException.
+                    // NetworkStream.ReadAsync observes its token only before the
+                    // read is issued; once parked, the only thing that unblocks it
+                    // is the socket being closed under it. Without this translation
+                    // a clean StopAsync - CancelPump, then DisconnectAsync - ends
+                    // with the parked read faulting on ObjectDisposedException, and
+                    // a session's receive pump grades that as a transport fault
+                    // instead of the cancellation it actually is.
+                    throw new OperationCanceledException(cancellationToken);
                 }
                 catch (ObjectDisposedException) when (!cancellationToken.IsCancellationRequested)
                 {
