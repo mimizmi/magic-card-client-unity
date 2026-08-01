@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
@@ -63,6 +64,62 @@ namespace Echo.Harness.Tests.EditMode
                 "A timeout resumes on the CancelAfter timer's thread, and the finally " +
                 "below it mutates pendingRequests. The hop is what keeps that " +
                 "dictionary single-threaded.");
+        }
+
+        /// <summary>
+        /// The sibling of the timeout test above, and the reason it is not
+        /// redundant with it is the thread the cancellation comes from. Every
+        /// other caller-cancellation test in this suite - three in
+        /// ProtocolSessionRequestTests and one in ProtocolSessionLifecycleTests -
+        /// calls Cancel() on the NUnit main thread, so the frame it resumes is
+        /// already on the session's context and a missing hop is invisible.
+        /// Cancelling from the thread pool is what puts RequestAsync's finally,
+        /// which mutates pendingRequests, on a thread the pump does not own.
+        /// </summary>
+        [Test]
+        public void ACallerCancellationHopsBeforeItsFinallyTouchesTheGate()
+        {
+            using var session = CreateStarted(out _, out var scheduler, out _);
+            using var cancellation = new CancellationTokenSource();
+            var before = scheduler.SwitchCount;
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(30),
+                cancellation.Token).Preserve();
+
+            // Joined rather than fired and forgotten, so the id below is written
+            // before it is read and the request has already resumed - the
+            // cancellation callback completes the waiter inline on this very
+            // thread - by the time the assertions run.
+            var cancellingThreadId = 0;
+            Task.Run(() =>
+            {
+                cancellingThreadId = Thread.CurrentThread.ManagedThreadId;
+                cancellation.Cancel();
+            }).GetAwaiter().GetResult();
+
+            Assert.Throws<OperationCanceledException>(
+                () => pending.GetAwaiter().GetResult(),
+                "Caller cancellation must still surface as cancellation, not as a " +
+                "TimeoutException: the request was abandoned, it did not time out.");
+
+            Assert.That(
+                cancellingThreadId,
+                Is.Not.EqualTo(Thread.CurrentThread.ManagedThreadId),
+                "This test proves nothing unless the cancellation really came from " +
+                "another thread.");
+            Assert.That(scheduler.SwitchCount, Is.EqualTo(before + 1),
+                "A cancelled request resumes on whichever thread called Cancel, and " +
+                "the finally below it removes its entry from pendingRequests. " +
+                "Without a hop that removal races the pump's own Dispatch and " +
+                "FailPendingRequests over the same Dictionary.");
+            Assert.That(
+                scheduler.ObservedThreadIds[scheduler.SwitchCount - 1],
+                Is.EqualTo(cancellingThreadId),
+                "The hop must be requested from the off-context thread - that is " +
+                "the frame that needs moving.");
         }
 
         [Test]

@@ -214,17 +214,42 @@ namespace Echo.Harness.Application
                         .AttachExternalCancellation(timeoutCancellation.Token);
                     return (TResponse)response;
                 }
+                // Both failing exits hop, and only the exception each produces
+                // differs. Hopping before the throw means hopping before this
+                // frame's finally removes its gate entry; without it the resuming
+                // thread and the pump can mutate pendingRequests concurrently, and
+                // a Dictionary resized from two threads can misroute a response to
+                // subscribers. The success path needs no hop: TrySetResult is
+                // called from Dispatch, which already ran on the context.
+                //
+                // Two clauses rather than one widened filter, because the two exits
+                // must stay distinguishable to a caller: a deadline that elapsed is
+                // a TimeoutException, and a caller that abandoned its own request
+                // is an OperationCanceledException. One clause could not produce
+                // both without re-deriving which of the two had happened.
+                //
+                // The negated filter comes first on purpose, and that ordering is
+                // what makes the pair exhaustive. Filters run sequentially against
+                // the live token: if the first reads the token as not cancelled it
+                // matches immediately, and if it reads it as cancelled the token
+                // can never go back, so the second is certain to match. Written the
+                // other way round, a cancellation landing between the two filters
+                // would leave both false and let the raw exception escape past the
+                // hop - the shape TcpTransport's read path warns about.
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // Hopped before the throw, which means before this frame's
-                    // finally removes its gate entry. Without it the timer thread
-                    // and the pump can mutate pendingRequests concurrently, and a
-                    // Dictionary resized from two threads can misroute a response
-                    // to subscribers. The success path needs no hop: TrySetResult
-                    // is called from Dispatch, which already ran on the context.
-                    await scheduler.SwitchToSessionContextAsync(cancellationToken);
+                    await SwitchToSessionContextForTeardownAsync();
                     throw new TimeoutException(
                         $"{requestId} received no {responseId} within {timeout}.");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // The exit that used to skip the hop entirely, leaving the
+                    // finally below to mutate pendingRequests on whatever thread
+                    // called Cancel. Nothing about a caller cancelling makes that
+                    // Dictionary safer to touch off-context than a timeout does.
+                    await SwitchToSessionContextForTeardownAsync();
+                    throw;
                 }
             }
             finally
@@ -240,6 +265,45 @@ namespace Echo.Harness.Application
                 {
                     pendingRequests.Remove(responseId);
                 }
+            }
+        }
+
+        /// <summary>
+        /// The hop a failing <see cref="RequestAsync{TResponse}"/> takes on its way
+        /// out, so that the <c>finally</c> which un-registers its pending entry runs
+        /// on the session's context rather than on the timer or cancelling thread it
+        /// happened to resume on.
+        ///
+        /// <para><b>CancellationToken.None, deliberately.</b> The caller's token is
+        /// already cancelled on one of the two paths that come here, and that is
+        /// exactly when the hop matters most - handing it in would make the switch
+        /// refuse to happen at the moment it is needed. It is not a hypothetical
+        /// either way: RecordingSessionScheduler returns an already-cancelled
+        /// UniTask without switching at all, and MainThreadSessionScheduler off the
+        /// main thread queues on the player loop regardless and only consults the
+        /// token once the continuation has already arrived. Passing None is what
+        /// makes both implementations perform the switch this method exists for.</para>
+        ///
+        /// <para><b>A failing hop is swallowed, and that is a trade rather than an
+        /// oversight.</b> The exception the caller must be told about is the timeout
+        /// or the cancellation - the thing that actually ended its request - not a
+        /// bookkeeping failure on the way out; letting the hop's exception win would
+        /// replace a report the caller can act on with one it cannot. What is lost
+        /// is real and is stated here because there is nowhere else to state it: when
+        /// the hop fails, the <c>finally</c> runs off-context after all, unreported.
+        /// There is no better landing place for it. PublishFault would iterate
+        /// faultHandlers from the very thread this hop failed to leave, which is the
+        /// same class of race the hop exists to prevent.</para>
+        /// </summary>
+        private async UniTask SwitchToSessionContextForTeardownAsync()
+        {
+            try
+            {
+                await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
+            }
+            catch (Exception)
+            {
+                // See above: nothing here may outrank the failure being reported.
             }
         }
 
