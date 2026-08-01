@@ -300,6 +300,33 @@ function Invoke-BatchModeUnityTests {
         throw 'UnityEditorPath is required when no connected editor is available.'
     }
 
+    # Two Unity editors cannot share one project directory. This fallback is
+    # reached whenever the connected probe does not see an instance in state
+    # 'ready', and a busy editor -- compiling, importing, mid domain reload, or
+    # running PlayMode -- is not 'ready'. So an ordinary verification run could
+    # launch a second editor against a project a developer had open and end their
+    # session. That happened repeatedly during this iteration.
+    #
+    # Existence of the lockfile is not the test: a crashed editor leaves one
+    # behind. A running editor holds it open, so failing to open it exclusively
+    # is what proves the project is actually in use.
+    $Lockfile = Join-Path $ProjectRoot 'Temp\UnityLockfile'
+    if (Test-Path -LiteralPath $Lockfile -PathType Leaf) {
+        $Held = $false
+        try {
+            $Stream = [System.IO.File]::Open($Lockfile, 'Open', 'ReadWrite', 'None')
+            $Stream.Dispose()
+        } catch [System.IO.IOException] {
+            $Held = $true
+        }
+        if ($Held) {
+            throw ("A Unity editor already has $ProjectRoot open, so this run " +
+                'refuses to start a batch-mode editor against it. Let that ' +
+                'editor finish what it is doing and re-run, so the tests go ' +
+                'through the connected-editor path instead.')
+        }
+    }
+
     foreach ($Mode in @('EditMode', 'PlayMode')) {
         $ResultPath = Join-Path $ArtifactsDirectory "$Mode-results.xml"
         $LogPath = Join-Path $ArtifactsDirectory "$Mode-unity.log"
