@@ -23,53 +23,59 @@ deliverable.
 
 ## Phase 1 — production infrastructure
 
-- [ ] Introduce protocol version/capability negotiation with the Go server.
-- [ ] Implement a cancellable TCP transport with partial-read framing,
-  backpressure, reconnect policy, and structured telemetry.
-- [ ] Serialize writes in the real transport, and make `DisconnectAsync` idempotent.
+- [ ] Introduce protocol version/capability negotiation. **Blocked on a server
+  change:** `Server.Start` goes straight from `Accept` to `sess.run()` with no
+  handshake, so this cannot be done from the client alone. Scheduled for the
+  protocol-evolution iteration, together with a correlation identifier, where the
+  read-only constraint on the Go repository is lifted and both sides change together.
+- [ ] Add reconnect policy and structured telemetry to `TcpTransport`. Framing,
+  cancellation, write serialization, the send budget, and the read-idle watchdog
+  landed with the transport; reconnect and metrics did not, so a dropped link today
+  faults the session and stays down until something calls StopAsync and StartAsync.
+- [x] Serialize writes in the real transport, and make `DisconnectAsync` idempotent.
   `ITransport.SendAsync` now documents the concurrency requirement: the session
   answers a heartbeat from the receive pump, so a caller's send and a `Pong` can be
   in flight together, and a length prefix interleaved with another body
   desynchronizes the stream fatally.
-- [ ] Wrap `ProtocolSession.StopAsync` in `try`/`finally`. `FailPendingRequests`
+- [x] Wrap `ProtocolSession.StopAsync` in `try`/`finally`. `FailPendingRequests`
   currently sits after the `DisconnectAsync` await, so a throwing disconnect — or an
   already-cancelled token handed to `StopAsync`, a realistic shutdown pattern —
   strands every waiter and leaves `State == Connected` over a dead pump.
-- [ ] Give `ProtocolSession.Dispose` a defined transport story. It cancels the pump
+- [x] Give `ProtocolSession.Dispose` a defined transport story. It cancels the pump
   but never disconnects and cannot await, so a real socket stays open until
   finalization and the server-side session lingers until its own timeout. Choose
   between a fire-and-forget disconnect and a documented "stop before disposing"
   contract.
-- [ ] Decide what `StopAsync` from `Faulted` means. It disconnects a second time,
+- [x] Decide what `StopAsync` from `Faulted` means. It disconnects a second time,
   reaches `Disconnected`, and lets `StartAsync` succeed again, so restart-after-fault
   exists today undesigned and untested.
-- [ ] Make `ProtocolSession` safe for the second thread a real socket introduces.
+- [x] Make `ProtocolSession` safe for the second thread a real socket introduces.
   `pendingRequests` is a plain `Dictionary` and `State` an ordinary auto-property,
   both written from the pump's stack and from the `CancelAfter` timer's thread-pool
   thread, where a concurrent resize can misroute a response to subscribers; a caller
   awaiting `RequestAsync` also resumes off the main thread after a timeout. Check the
   deadline on the pump or hop explicitly.
-- [ ] Close `Dispatch` sitting outside the receive pump's `try`. `State` can read
+- [x] Close `Dispatch` sitting outside the receive pump's `try`. `State` can read
   `Connected` for a pump that a `Dispatch`-internal exception already killed, and each
   callee is individually responsible for not throwing, so a future branch inherits no
   protection. Either wrap the `Dispatch(message)` call alone in a `try` that publishes
   a fault and continues, or document the invariant on `Dispatch`.
-- [ ] Answer a requester whose response payload fails to decode. The decode-failure
+- [x] Answer a requester whose response payload fails to decode. The decode-failure
   branch runs before the pending-request check, so a truncated response is dropped
   with its fault on the fault channel while the requester stalls its whole timeout —
   a hardcoded 10 s for `ProbeRoundTripAsync`.
-- [ ] Rename `ProtocolSession.DefaultRequestTimeout` to what it actually is, the
+- [x] Rename `ProtocolSession.DefaultRequestTimeout` to what it actually is, the
   round-trip probe's deadline. `RequestAsync` has no overload that defaults a timeout,
   the constant is unreachable from `IProtocolSession`, and no test pins it, so raising
   it for a slow login would silently give every latency probe the longer deadline.
-- [ ] Add a transport double whose `SendAsync` can park, and pin the two residuals
+- [x] Add a transport double whose `SendAsync` can park, and pin the two residuals
   that need one: the identity-checked gate removal in `RequestAsync`'s `finally`, and
   a synchronous `try`/`catch` heartbeat reply, which loses a `Pong` when the send
   faults after returning. Cover `FakeTransport.FailNextSend` itself while there — it
   has no fake-level test at all, so its null guard and its one-shot semantics are both
   unpinned; a second `Bodyless(Ping)` in the third heartbeat test, asserting one `Pong`
   and faults still at 1, closes that in one line.
-- [ ] Give a single-flight gate rejection and a stale echo distinguishable exception
+- [x] Give a single-flight gate rejection and a stale echo distinguishable exception
   types. Both throw `InvalidOperationException` (`ProtocolSession.cs:165` and `:224`),
   so a probe loop firing every 5 s against a 10 s deadline cannot tell "a request is
   already in flight" from a genuine correlation mismatch without matching on the
@@ -81,23 +87,30 @@ deliverable.
   returns no wrapper when the task is already completed, and a throwing caller
   continuation is contained but never reported, because `TrySetException` on an
   already-completed core returns `false`.
-- [ ] Publish the root-cause receive failure before the disconnect failure in
+- [x] Publish the root-cause receive failure before the disconnect failure in
   `FaultTheStreamAsync` (`ProtocolSession.cs:458-471`). A consumer that reads the first
   `TransportFailure` — the natural thing to do — currently gets the symptom rather than
   the cause.
-- [ ] Resolve the contradiction over `SessionFault.MessageId` for `TransportFailure`:
+- [x] Resolve the contradiction over `SessionFault.MessageId` for `TransportFailure`:
   pick one meaning and make the design and the code agree. The design calls the field
   "meaningless for `TransportFailure`" while the heartbeat path populates it with
   `MessageId.Pong` (`ProtocolSession.cs:399-402`) and the stream fault passes `default`
   (`:466`, `:471`). `Kind` is identical on all three, so that field is the only thing
   separating "the heartbeat write failed, the connection is probably still usable" from
   "the stream desynchronized", and a maintainer trusting the design would delete it.
-- [ ] Settle one assertion convention for `SessionFault` contents and apply it across
+- [x] Settle one assertion convention for `SessionFault` contents and apply it across
   the session. `Kind` is the only field asserted on the faults the session generates
   itself, the unknown-message-id fault's `MessageId` excepted
   (`ProtocolSessionLifecycleTests.cs:65`), so the heartbeat fault's `MessageId` and
   `Diagnostic` are unpinned, and with them the correlation-mismatch diagnostic's
   operand order — the only direction information in that message.
+- [ ] Decide whether one `NoDestination` fault per undelivered message is the right
+  volume. It replaced a silent drop, which is strictly better, but every event that
+  arrives before its UI subscriber now publishes one; the first Phase 2 view will
+  show whether that reads as signal or noise.
+- [ ] Give `MainThreadSessionScheduler` a DI registration. It is implemented and
+  PlayMode-tested but nothing constructs it, because `HarnessComposition` registers
+  only `HarnessRuntimeDescriptor` and session lifetime scopes are still undefined.
 - [ ] Add disposable-server golden integration tests.
 - [ ] Define app/session/scene VContainer lifetime scopes.
 - [ ] Implement Addressables catalog environments, build profiles, release
