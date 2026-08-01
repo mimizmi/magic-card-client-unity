@@ -315,6 +315,21 @@ namespace Echo.Harness.TestKit
         }
     }
 
+    /// <summary>
+    /// Wall-clock time, for the few tests that need real elapsed time rather than
+    /// a time they control. It is the only <see cref="IClock"/> that can measure a
+    /// real round trip: a <see cref="ManualClock"/> never advances on its own, so
+    /// a latency measured against one is always zero.
+    ///
+    /// <para>Use it only where the elapsed interval is itself under test.
+    /// Everything else should stay on ManualClock, because a test that depends on
+    /// wall-clock time depends on the machine it runs on.</para>
+    /// </summary>
+    public sealed class SystemClock : IClock
+    {
+        public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
+    }
+
     public sealed class ManualClock : IClock
     {
         public ManualClock(DateTimeOffset initialTime)
