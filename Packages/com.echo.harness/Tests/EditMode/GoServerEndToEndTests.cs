@@ -42,11 +42,21 @@ namespace Echo.Harness.Tests.EditMode
         private static readonly TimeSpan Patience = TimeSpan.FromSeconds(15);
 
         /// <summary>
-        /// One server ping interval (15 s) plus slack. The interval is a
-        /// compile-time constant in the server's session.go, so there is no way to
-        /// make this test faster, and it is worth its cost: a client that fails to
-        /// answer a heartbeat loses the connection 35 seconds later with nothing in
-        /// any log to say why.
+        /// One server ping interval (15 s) plus slack, which is long enough to be
+        /// certain a Ping has arrived and no longer. The interval is a compile-time
+        /// constant in the server's session.go, so there is no way to make this
+        /// test faster, and it is worth its cost: a client that fails to answer a
+        /// heartbeat loses the connection with nothing in any log to say why.
+        ///
+        /// <para>Deliberately NOT long enough for the server to act on a missing
+        /// Pong, and this is the arithmetic that says so. The server's heartbeat
+        /// loop ticks every 15 s and evaluates
+        /// <c>time.Since(lastPongAt) &gt; pongTimeout</c> (35 s) on each tick, with
+        /// <c>lastPongAt</c> set at accept and refreshed only by an inbound Pong.
+        /// So the ticks land at 15/30/45 s and the FIRST one that can close a
+        /// silent client is t=45 s. Waiting for that would nearly double the
+        /// slowest test in the suite; asserting the reply was written instead pins
+        /// the same property at t=25 s.</para>
         /// </summary>
         private static readonly TimeSpan OneHeartbeatInterval = TimeSpan.FromSeconds(25);
 
@@ -65,10 +75,19 @@ namespace Echo.Harness.Tests.EditMode
                 var (transport, session) = await StartSessionAsync(endpoint);
 
                 // The session is disposed first and the transport second, which is
-                // what these two using statements do in this order. It matters:
-                // ProtocolSession.Dispose launches its own bounded disconnect
-                // through the transport, and a transport already disposed would
-                // turn that into a swallowed failure rather than a clean close.
+                // what these two using statements do in this order. Keep it, but
+                // not for the reason this comment used to give: it claimed the
+                // reverse order would turn the session's bounded disconnect into a
+                // swallowed failure. Measured, it would not fail at all.
+                // TcpTransport.DisconnectAsync has no disposed guard and returns
+                // immediately when State is already Disconnected, which Dispose
+                // sets - so a transport disposed first makes
+                // ProtocolSession.Dispose's disconnect a silent no-op.
+                //
+                // A no-op is still the wrong thing to arrange deliberately. This
+                // order is what makes the session's close the one that actually
+                // closes the socket, on the path production takes, which is the
+                // only reason this tier can be said to have exercised it.
                 using (transport)
                 using (session)
                 {
@@ -116,9 +135,17 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         /// <summary>
-        /// The suite's one slow test. It is the only place the heartbeat reply is
-        /// exercised against the peer that actually enforces it: every other
-        /// heartbeat test hands the session a Ping we wrote ourselves.
+        /// The suite's one slow test. It is the only place a Ping the server itself
+        /// composed and sent is answered: every other heartbeat test hands the
+        /// session a Ping we wrote ourselves.
+        ///
+        /// <para>What it proves and what it does not. It proves the client wrote a
+        /// Pong in reply to a real server Ping - the reply is counted at the
+        /// transport, after the write returned, so a session that merely intended to
+        /// answer does not satisfy it. It does NOT exercise the server's own
+        /// enforcement: the run ends at t=25 s and the first heartbeat tick that can
+        /// close a silent client is t=45 s, so the server has not yet had the chance
+        /// to judge us. See OneHeartbeatInterval for that arithmetic.</para>
         /// </summary>
         [UnityTest]
         [Timeout(60000)]
@@ -136,9 +163,20 @@ namespace Echo.Harness.Tests.EditMode
 
                     await UniTask.Delay(OneHeartbeatInterval, DelayType.Realtime);
 
+                    // The assertion the name of this test is about, and the only one
+                    // here that a silent client fails. Everything below it is
+                    // necessary but not sufficient: at t=25 s a client that answered
+                    // and one that said nothing at all are still indistinguishable
+                    // to the server, so a Connected state, an empty fault list and a
+                    // working round trip hold for both.
+                    Assert.That(transport.PongsSent, Is.GreaterThan(0),
+                        "The server sends a Ping every 15 seconds and this test waits " +
+                        "past one of them, so at least one Pong must have reached the " +
+                        "wire. Counted rather than bounded: connect latency decides " +
+                        "whether the second interval also lands inside the window.");
+
                     Assert.That(session.State, Is.EqualTo(SessionState.Connected),
-                        "A missed Pong makes the server close the connection, which " +
-                        "the receive pump would surface as a fault and a Faulted state.");
+                        "The reply above was written; this says the link survived it.");
                     Assert.That(faults, Is.Empty,
                         "Faults: " + string.Join("; ", faults.ConvertAll(f => f.Diagnostic)));
 
@@ -172,12 +210,12 @@ namespace Echo.Harness.Tests.EditMode
         /// and no retry: the server is already up, so a failed connect is a real
         /// failure rather than a not-yet.
         /// </summary>
-        private static async UniTask<(TcpTransport Transport, ProtocolSession Session)>
+        private static async UniTask<(CountingTransport Transport, ProtocolSession Session)>
             StartSessionAsync(RemoteServerEndpoint endpoint)
         {
-            var transport = new TcpTransport(
+            var transport = new CountingTransport(new TcpTransport(
                 new TcpTransportOptions { Host = endpoint.Host, Port = endpoint.Port },
-                new SystemClock());
+                new SystemClock()));
             ProtocolSession session = null;
             try
             {
@@ -198,6 +236,64 @@ namespace Echo.Harness.Tests.EditMode
             }
 
             return (transport, session);
+        }
+
+        /// <summary>
+        /// A pass-through <see cref="ITransport"/> that counts the heartbeat replies
+        /// the session writes. It exists because the property this tier is named for
+        /// - the client answers a real Ping - is otherwise unobservable from the
+        /// outside: the reply is fire-and-forget from the receive pump, it produces
+        /// no state change, no fault and no return value, and the peer that would
+        /// react to its absence does not react for another twenty seconds.
+        ///
+        /// <para>Counted AFTER the inner send returns, deliberately. A session that
+        /// tried to answer and failed at the socket is exactly the failure worth
+        /// catching, and incrementing first would count it as a success.</para>
+        ///
+        /// <para>Local to this fixture rather than in TestKit. It is scaffolding for
+        /// one assertion, and TestKit is an assembly the architecture gate now pins
+        /// specifically because things that touch sockets keep landing in it.</para>
+        /// </summary>
+        private sealed class CountingTransport : ITransport, IDisposable
+        {
+            private readonly TcpTransport inner;
+            private int pongsSent;
+
+            public CountingTransport(TcpTransport inner)
+            {
+                this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
+            }
+
+            /// <summary>
+            /// Interlocked on both ends: the reply is written from the receive pump,
+            /// which over a real socket resumes on whichever thread the read
+            /// completed on, and the assertion reads from the test's coroutine.
+            /// </summary>
+            public int PongsSent => Interlocked.CompareExchange(ref pongsSent, 0, 0);
+
+            public TransportState State => inner.State;
+
+            public UniTask ConnectAsync(CancellationToken cancellationToken) =>
+                inner.ConnectAsync(cancellationToken);
+
+            public async UniTask SendAsync(
+                TransportMessage message,
+                CancellationToken cancellationToken)
+            {
+                await inner.SendAsync(message, cancellationToken);
+                if (message.MessageId == MessageId.Pong)
+                {
+                    Interlocked.Increment(ref pongsSent);
+                }
+            }
+
+            public UniTask<TransportMessage> ReceiveAsync(CancellationToken cancellationToken) =>
+                inner.ReceiveAsync(cancellationToken);
+
+            public UniTask DisconnectAsync(CancellationToken cancellationToken) =>
+                inner.DisconnectAsync(cancellationToken);
+
+            public void Dispose() => inner.Dispose();
         }
     }
 }

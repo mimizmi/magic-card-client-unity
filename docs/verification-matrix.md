@@ -68,7 +68,28 @@ unrelated reason.
 | Silence beyond the read-idle deadline fails the receive, and every frame resets it | `TcpTransportIdleTests.SilenceBeyondTheIdleTimeoutFailsTheReceive`, `.TheIdleDeadlineResetsForEachFrame`, `.ACallerCancellationIsNotReportedAsAnIdleTimeout` | A half-open link the kernel takes minutes to notice, parking the pump indefinitely. The reset is the other half: without it a healthy connection dies at a fixed age, and a test of the timeout alone cannot tell the two apart. |
 | Every dispatched message hops to the session's context before anything reads or writes session state | `ProtocolSessionConfinementTests` (four tests) | **Mutation-verified.** Confinement, not locking, is what makes a plain `Dictionary` of pending requests and a plain `State` property safe once a real socket introduces a second thread — including the request timeout, which fires on a thread-pool thread and must hop before its `finally` touches the single-flight gate. |
 | `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests` (PlayMode, four tests) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. Nothing constructs this type in production yet — see the open checklist item — so PlayMode is currently its only consumer. |
-| Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode, three tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. See below. |
+| Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode, three tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
+
+### What the heartbeat test can and cannot see
+
+`TheClientAnswersARealServerHeartbeat` waits 25 s and asserts a `Pong` reached the
+wire. That last part is the whole test. Its other three assertions — the session is
+still `Connected`, no fault was published, a round trip still completes — cannot
+fail for a client that never answered, and this was measured rather than argued:
+with `ProtocolSession`'s heartbeat reply removed entirely, all three still passed.
+
+The arithmetic is the server's. `internal/network/session.go` ticks its heartbeat
+loop every 15 s and closes when `time.Since(lastPongAt) > 35s`, with `lastPongAt`
+set at accept and refreshed **only** by an inbound `Pong`. The ticks therefore land
+at 15/30/45 s and the first one that can close a silent client is **t=45 s** — twenty
+seconds after this test has finished. The client's own `ReadIdleTimeout` is 45 s, so
+it cannot notice either.
+
+So the property this tier proves is *we reply to a real Ping*, not *the server
+accepts our replies*. Making it the second would mean waiting past 45 s and nearly
+doubling the slowest test in the suite; the cost was judged higher than the extra
+claim is worth. Anything asserting the server's own enforcement belongs in a test
+that says so in its name.
 
 ### The end-to-end tier skips itself, and what that costs
 
