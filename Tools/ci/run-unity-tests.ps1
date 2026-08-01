@@ -247,10 +247,17 @@ function Invoke-BatchModeUnityTests {
     foreach ($Mode in @('EditMode', 'PlayMode')) {
         $ResultPath = Join-Path $ArtifactsDirectory "$Mode-results.xml"
         $LogPath = Join-Path $ArtifactsDirectory "$Mode-unity.log"
+        # No -quit. It is not merely redundant alongside -runTests, it is fatal:
+        # measured on this project, -quit shuts the editor down before the test
+        # runner engages, so Unity exits 0, the log ends at "Batchmode quit
+        # successfully invoked - shutting down!", and no results XML is ever
+        # written. The script then throws "<Mode> did not produce ...", which fails
+        # loudly rather than passing falsely - but it means this fallback, the only
+        # path CI takes, could never run the suite at all. -runTests closes the
+        # editor itself once the run finishes.
         $Arguments = @(
             '-batchmode'
             '-nographics'
-            '-quit'
             '-projectPath'
             $ProjectRoot
             '-runTests'
