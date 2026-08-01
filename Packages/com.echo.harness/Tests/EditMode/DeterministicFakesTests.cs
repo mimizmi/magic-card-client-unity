@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -170,6 +171,67 @@ namespace Echo.Harness.Tests.EditMode
             var received = transport.ReceiveAsync(default).GetAwaiter().GetResult();
 
             Assert.That(received.MessageId, Is.EqualTo(MessageId.Pong));
+        }
+
+        [Test]
+        public void FakeTransport_FailNextSendRejectsANullFailure()
+        {
+            var transport = new FakeTransport();
+
+            Assert.Throws<ArgumentNullException>(() => transport.FailNextSend(null));
+        }
+
+        /// <summary>
+        /// One-shot, and the recorded-sends assertion is the half that matters. A
+        /// fake that threw and recorded the frame anyway would let a session test
+        /// assert on a message the wire never carried.
+        /// </summary>
+        [Test]
+        public void FakeTransport_FailNextSendAppliesToExactlyOneSend()
+        {
+            var transport = new FakeTransport();
+            transport.ConnectAsync(default).GetAwaiter().GetResult();
+            transport.FailNextSend(new IOException("socket closed"));
+
+            Assert.Throws<IOException>(
+                () => transport.SendAsync(
+                    new TransportMessage(MessageId.Pong, Array.Empty<byte>()),
+                    default).GetAwaiter().GetResult());
+
+            Assert.DoesNotThrow(
+                () => transport.SendAsync(
+                    new TransportMessage(MessageId.Pong, Array.Empty<byte>()),
+                    default).GetAwaiter().GetResult());
+            Assert.That(transport.Sent, Has.Count.EqualTo(1),
+                "The failed send must not have been recorded as sent.");
+        }
+
+        [Test]
+        public void FakeTransport_FailNextDisconnectRejectsANullFailure()
+        {
+            var transport = new FakeTransport();
+
+            Assert.Throws<ArgumentNullException>(() => transport.FailNextDisconnect(null));
+        }
+
+        /// <summary>
+        /// The DisconnectCount assertion pins the ordering the fake documents: the
+        /// close is accounted for before the injected failure is thrown, because a
+        /// transport that threw first would leave a session believing it still had
+        /// a connection to close.
+        /// </summary>
+        [Test]
+        public void FakeTransport_FailNextDisconnectAppliesToExactlyOneDisconnect()
+        {
+            var transport = new FakeTransport();
+            transport.ConnectAsync(default).GetAwaiter().GetResult();
+            transport.FailNextDisconnect(new IOException("close failed"));
+
+            Assert.Throws<IOException>(
+                () => transport.DisconnectAsync(default).GetAwaiter().GetResult());
+            Assert.DoesNotThrow(
+                () => transport.DisconnectAsync(default).GetAwaiter().GetResult());
+            Assert.That(transport.DisconnectCount, Is.EqualTo(2));
         }
 
         [Test]
