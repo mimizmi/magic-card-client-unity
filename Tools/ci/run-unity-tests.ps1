@@ -24,6 +24,15 @@ function ConvertFrom-NativeJson {
 
 $StatusPath = Join-Path $ProjectRoot 'Temp\pipeline_test_status.json'
 
+# The one test class permitted to skip itself, and the only reason a skip is
+# tolerated below. It talks to the authoritative Go server over a real socket, and
+# the endpoint is supplied through ECHO_SERVER_HOST rather than committed, because
+# it is a developer address that does not belong in the repository. The cost is
+# stated plainly in docs/verification-matrix.md: on a machine without that
+# variable the suite goes green having never run the one test that can disagree
+# with our own reading of the protocol.
+$SanctionedSkipClass = 'Echo.Harness.Tests.EditMode.GoServerEndToEndTests'
+
 function Invoke-ConnectedUnityTestMode {
     param(
         [System.Management.Automation.CommandInfo]$UnityCli,
@@ -104,21 +113,68 @@ function Invoke-ConnectedUnityTestMode {
               "compile reaches here as an empty run, which is not a pass."
     }
 
-    Write-Host "$($Mode): $($Status.summary.passed)/$($Status.summary.total) passed."
-    if ([int]$Status.summary.passed -ne [int]$Status.summary.total) {
+    $Passed = [int]$Status.summary.passed
+    $Total = [int]$Status.summary.total
+    $Failed = [int]$Status.summary.failed
+    $Skipped = [int]$Status.summary.skipped
+    $Inconclusive = [int]$Status.summary.inconclusive
+
+    # The skip count is printed whenever it is non-zero, so a tier that quietly
+    # stopped running can never be invisible in a green log. A bare "149/152
+    # passed." reads like a partial failure; "149/152 passed, 3 skipped." says
+    # what actually happened.
+    $Line = "$($Mode): $Passed/$Total passed"
+    if ($Skipped -gt 0) {
+        $Line += ", $Skipped skipped"
+    }
+    Write-Host "$Line."
+
+    if ($Failed -gt 0 -or $Inconclusive -gt 0) {
         $Failures = @(
             $Status.results |
                 Where-Object Status -eq 'Failed' |
                 ForEach-Object { "$($_.FullName): $($_.Message)" }
         )
         throw @"
-$Mode did not pass every test: passed=$($Status.summary.passed),
-total=$($Status.summary.total), failed=$($Status.summary.failed),
-skipped=$($Status.summary.skipped),
-inconclusive=$($Status.summary.inconclusive).
+$Mode did not pass every test: passed=$Passed, total=$Total, failed=$Failed,
+skipped=$Skipped, inconclusive=$Inconclusive.
 Failures:
  - $($Failures -join "`n - ")
 "@
+    }
+
+    # Every test must be accounted for. Without this a result that is neither
+    # passed, failed, skipped nor inconclusive - or a summary that simply does not
+    # add up - would slip through the two checks around it.
+    if ($Passed + $Skipped -ne $Total) {
+        throw @"
+$Mode did not account for every test: passed=$Passed, skipped=$Skipped,
+total=$Total.
+"@
+    }
+
+    # One sanctioned skip, and no more. `passed -ne total` used to fail the gate
+    # outright, which was right for a suite where nothing may skip; the end-to-end
+    # tier changed that, because its endpoint is deliberately not committed and so
+    # every machine that has not opted in - CI included - skips it. Tolerating it
+    # by class rather than by a blanket "skips are fine" rule keeps the invariant
+    # that matters: a test which quietly stops running anywhere else still fails
+    # the gate, and gets named while doing it.
+    if ($Skipped -gt 0) {
+        $Unsanctioned = @(
+            $Status.results |
+                Where-Object Status -eq 'Skipped' |
+                Where-Object { $_.FullName -notlike "$SanctionedSkipClass.*" } |
+                ForEach-Object { "$($_.FullName): $($_.Message)" }
+        )
+        if ($Unsanctioned.Count -gt 0) {
+            throw @"
+$Mode skipped $($Unsanctioned.Count) test(s) outside $SanctionedSkipClass, which
+is the only class allowed to skip itself. A test that stops running is not a
+pass:
+ - $($Unsanctioned -join "`n - ")
+"@
+        }
     }
 
     return $Status.summary
