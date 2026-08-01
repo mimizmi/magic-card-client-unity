@@ -84,9 +84,30 @@ namespace Echo.Harness.Application
         /// A round-trip probe returns the difference between two reads of this
         /// property, so an implementation whose value can step backwards reports a
         /// negative latency, and one that can step forwards reports a 30 s round trip
-        /// on a healthy link. The only implementation today is monotonic by
-        /// construction, so no test can catch a replacement that is not; the
-        /// requirement is stated here because this is the only place it can be.
+        /// on a healthy link.
+        ///
+        /// <para><b>A live risk, not a theoretical one - and it stopped being
+        /// theoretical without this comment noticing.</b> It used to say the only
+        /// implementation was monotonic by construction, so no test could catch a
+        /// replacement that was not. That was true of ManualClock, whose Advance
+        /// rejects a negative duration. It has been false since SystemClock arrived:
+        /// that one returns DateTimeOffset.UtcNow, which a clock synchronisation or
+        /// a manual change can step in either direction, and both of the paths below
+        /// now run on it.</para>
+        ///
+        /// <para>What a backwards step costs today. SendBudget.TryConsume computes
+        /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches
+        /// a whole interval; a negative elapsed never does, so once the bucket has
+        /// drained the budget wedges at zero and every send is refused until the wall
+        /// clock passes where it had already been. And ProbeRoundTripAsync returns
+        /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
+        /// than zero - so a step landing inside a probe fails that test with a
+        /// negative latency and nothing to say where the number came from.</para>
+        ///
+        /// <para>No test can catch a non-monotonic implementation, because the
+        /// requirement is on the implementation rather than on any call site. That is
+        /// why it is stated here, and why a new IClock is the wrong place to be
+        /// clever.</para>
         /// </summary>
         DateTimeOffset UtcNow { get; }
     }

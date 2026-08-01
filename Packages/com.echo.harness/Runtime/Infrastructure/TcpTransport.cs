@@ -342,10 +342,25 @@ namespace Echo.Harness.Infrastructure
             // ticking editor loop - not the ~150 ms an unfocused editor's tick would
             // suggest - against a 45 s production deadline, and the outcome is nearly
             // right anyway: the link genuinely was idle right up to the deadline.
-            // Closing it needs an Interlocked completed-flag set here and checked
-            // inside AbandonTheLink, which puts shared mutable state into a class that
-            // has deliberately avoided any. That is the shape a fix would take; the
-            // cost was judged higher than the symptom.
+            //
+            // What a fix would cost, stated correctly this time. An earlier version
+            // of this note justified leaving it by saying the fix "puts shared
+            // mutable state into a class that has deliberately avoided any". That is
+            // simply false about this class: it has four volatile fields and a
+            // SemaphoreSlim, and the header seventeen lines of comment above them
+            // spends its whole length documenting cross-thread races on exactly
+            // those fields. The fix is also cheaper than that made it sound - a
+            // per-call int local, captured by turning the registration below into a
+            // closure and claimed with Interlocked.CompareExchange, adding no field
+            // to the class at all. What it costs is an allocation per receive and
+            // the method-group registration's readability.
+            //
+            // The reason to leave it is the size of what it buys. A flag set once
+            // ReceiveFrameAsync has returned still leaves a few instructions in
+            // which the timer can win, so it narrows this window rather than closing
+            // it - and the window it narrows is milliseconds against a 45 second
+            // deadline whose outcome is very nearly correct already. That trade, and
+            // not an invented property of the class, is why this stays.
             using var closing = deadline.Token.Register(AbandonTheLink);
 
             // Registered before the timer is armed, so a very short timeout cannot
