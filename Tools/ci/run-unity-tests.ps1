@@ -33,6 +33,221 @@ $StatusPath = Join-Path $ProjectRoot 'Temp\pipeline_test_status.json'
 # with our own reading of the protocol.
 $SanctionedSkipClass = 'Echo.Harness.Tests.EditMode.GoServerEndToEndTests'
 
+# Every check that decides whether a run passed, in one place, so that both
+# runners are graded identically.
+#
+# They were not. The connected path carried all of this inline while the batch
+# path - the only path CI takes - verified nothing but the process exit code and
+# the existence of the results file. So on CI there was no empty-run guard, no
+# accounting, no skip count, and above all no sanctioned-skip check, which is the
+# whole of the invariant that a test quietly ceasing to run is not a pass. CI is
+# also permanently in the skip state, which is precisely the state that check
+# exists to police.
+#
+# $Summary must expose total/passed/failed/skipped/inconclusive; $Results must be
+# one row per test with FullName, Status and Message. Both runners are adapted to
+# that shape before they get here rather than this function learning two.
+function Assert-UnityTestRunPassed {
+    param(
+        [string]$Mode,
+        $Summary,
+        $Results
+    )
+
+    if ($null -eq $Summary) {
+        throw "Unity $Mode produced no summary at all, which is not a pass."
+    }
+
+    # A run that found nothing is a failure, not a pass. When the test list comes
+    # back empty - an assembly that failed to compile, or a filter that matches
+    # nothing - the runner writes "completed" with every counter at zero, and a
+    # bare passed-ne-total check reads 0 -ne 0 as success and turns the whole gate
+    # green. The previous shape of this script caught that with a null check on
+    # the summary; this replaces it with one that also catches an empty run.
+    if ([int]$Summary.total -le 0) {
+        throw "Unity $Mode reported no tests at all. An assembly that fails to " +
+              "compile reaches here as an empty run, which is not a pass."
+    }
+
+    $Passed = [int]$Summary.passed
+    $Total = [int]$Summary.total
+    $Failed = [int]$Summary.failed
+    $Skipped = [int]$Summary.skipped
+    $Inconclusive = [int]$Summary.inconclusive
+    $Rows = @($Results)
+
+    # The skip count is printed whenever it is non-zero, so a tier that quietly
+    # stopped running can never be invisible in a green log. A bare "149/152
+    # passed." reads like a partial failure; "149/152 passed, 3 skipped." says
+    # what actually happened.
+    $Line = "$($Mode): $Passed/$Total passed"
+    if ($Skipped -gt 0) {
+        $Line += ", $Skipped skipped"
+    }
+    Write-Host "$Line."
+
+    if ($Failed -gt 0 -or $Inconclusive -gt 0) {
+        $Failures = @(
+            $Rows |
+                Where-Object { $_.Status -eq 'Failed' } |
+                ForEach-Object { "$($_.FullName): $($_.Message)" }
+        )
+        throw @"
+$Mode did not pass every test: passed=$Passed, total=$Total, failed=$Failed,
+skipped=$Skipped, inconclusive=$Inconclusive.
+Failures:
+ - $($Failures -join "`n - ")
+"@
+    }
+
+    # Kept as defence against a future producer, not because it catches anything
+    # today. It used to claim it caught "a result that is neither passed, failed,
+    # skipped nor inconclusive"; against both producers here `total` is defined as
+    # the sum of those four counters, which makes this condition algebraically
+    # `failed + inconclusive -ne 0` and therefore already handled immediately
+    # above. A producer that ever grows a fifth outcome, or one whose total counts
+    # discovered tests rather than summing results, is what this is for.
+    if ($Passed + $Skipped -ne $Total) {
+        throw @"
+$Mode did not account for every test: passed=$Passed, skipped=$Skipped,
+total=$Total.
+"@
+    }
+
+    # The rows must corroborate the counter, because the skip check below is only
+    # as good as the rows it reads. Measured adversarially against the connected
+    # producer's shape, all three of these passed the gate before this check
+    # existed: summary.skipped=1 with the row simply absent from results; a row
+    # whose Status read 'Ignored' rather than 'Skipped'; and results missing
+    # altogether. Each is a skipped test the sanctioned-skip filter never sees, so
+    # it fails open - the exact opposite of what that filter is for.
+    #
+    # Tautological where a runner derives its summary from these same rows, which
+    # is the batch path's case. It is not free even there: it pins that the
+    # derivation stays a derivation.
+    $SkippedRows = @($Rows | Where-Object { $_.Status -eq 'Skipped' })
+    if ($SkippedRows.Count -ne $Skipped) {
+        throw @"
+$Mode reports skipped=$Skipped but $($SkippedRows.Count) of its $($Rows.Count)
+result row(s) say 'Skipped'. The two disagree, so no skip can be judged against
+the one class allowed to skip itself. A row missing, or labelled anything other
+than 'Skipped', hides exactly the test that stopped running.
+"@
+    }
+
+    # One sanctioned skip, and no more. `passed -ne total` used to fail the gate
+    # outright, which was right for a suite where nothing may skip; the end-to-end
+    # tier changed that, because its endpoint is deliberately not committed and so
+    # every machine that has not opted in - CI included - skips it. Tolerating it
+    # by class rather than by a blanket "skips are fine" rule keeps the invariant
+    # that matters: a test which quietly stops running anywhere else still fails
+    # the gate, and gets named while doing it.
+    if ($Skipped -gt 0) {
+        $Unsanctioned = @(
+            $SkippedRows |
+                Where-Object { $_.FullName -notlike "$SanctionedSkipClass.*" } |
+                ForEach-Object { "$($_.FullName): $($_.Message)" }
+        )
+        if ($Unsanctioned.Count -gt 0) {
+            throw @"
+$Mode skipped $($Unsanctioned.Count) test(s) outside $SanctionedSkipClass, which
+is the only class allowed to skip itself. A test that stops running is not a
+pass:
+ - $($Unsanctioned -join "`n - ")
+"@
+        }
+    }
+
+    return $Summary
+}
+
+# The batch runner's NUnit XML, reshaped into what Assert-UnityTestRunPassed
+# reads.
+#
+# The summary is DERIVED from the test-case rows rather than read from the
+# test-run element's own attributes, and that is a stated limit rather than an
+# oversight. NUnit 3's `total` is a summary count whose relationship to the
+# skipped, ignored and explicit categories is not the same as the connected
+# producer's, and this project has no way to measure it: producing a batch-mode
+# results file means launching a second editor against a project a developer
+# keeps open, which is how a real session was destroyed during this iteration.
+# Grading the rows is correct regardless of what that attribute means, and the
+# rows are what the sanctioned-skip check needs anyway.
+#
+# The consequence is written down in docs/verification-matrix.md rather than left
+# implied: on the batch path the accounting check and the skipped-row cross-check
+# compare a derivation against itself, so neither can catch a producer that
+# miscounts. Everything else - the empty-run guard, named failures, the skip
+# count, and the sanctioned-skip check - grades identically on both paths.
+function ConvertFrom-NUnitResultsXml {
+    param([string]$Path)
+
+    [xml]$Document = Get-Content -Raw -LiteralPath $Path
+    $Cases = @($Document.SelectNodes('//test-case'))
+    if ($Cases.Count -eq 0) {
+        # Deliberately not left to the empty-run guard downstream. A results file
+        # that parsed but held no cases and a results file whose shape this
+        # function no longer understands are different problems, and only one of
+        # them is "the suite ran nothing".
+        throw "No <test-case> elements were found in $Path. Either the run " +
+              "produced nothing or the results format changed."
+    }
+
+    $Results = @(
+        $Cases | ForEach-Object {
+            $MessageNode = $_.SelectSingleNode('failure/message')
+            if ($null -eq $MessageNode) {
+                # Assert.Ignore writes its reason here rather than under failure,
+                # and that reason is what names the skipping class in the gate's
+                # own error text.
+                $MessageNode = $_.SelectSingleNode('reason/message')
+            }
+
+            $Message = $null
+            if ($null -ne $MessageNode) {
+                $Message = $MessageNode.InnerText.Trim()
+            }
+
+            [pscustomobject]@{
+                FullName = $_.fullname
+                Status = $_.result
+                Message = $Message
+            }
+        }
+    )
+
+    [pscustomobject]@{
+        summary = [pscustomobject]@{
+            total = $Results.Count
+            passed = @($Results | Where-Object { $_.Status -eq 'Passed' }).Count
+            failed = @($Results | Where-Object { $_.Status -eq 'Failed' }).Count
+            skipped = @($Results | Where-Object { $_.Status -eq 'Skipped' }).Count
+            inconclusive = @($Results | Where-Object { $_.Status -eq 'Inconclusive' }).Count
+        }
+        results = $Results
+    }
+}
+
+# Written by both runners, so a green run leaves the same machine-readable
+# evidence behind whichever path produced it. The batch path used to leave none,
+# which meant the artifact CI uploads said nothing about what CI had run.
+function Write-UnityTestSummary {
+    param(
+        [string]$Runner,
+        $EditMode,
+        $PlayMode
+    )
+
+    $Result = [ordered]@{
+        runner = $Runner
+        editMode = $EditMode
+        playMode = $PlayMode
+    }
+    $Result | ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath (Join-Path $ArtifactsDirectory 'unity-test-summary.json') `
+            -Encoding utf8
+}
+
 function Invoke-ConnectedUnityTestMode {
     param(
         [System.Management.Automation.CommandInfo]$UnityCli,
@@ -102,82 +317,10 @@ function Invoke-ConnectedUnityTestMode {
         }
     } while ($Status.status -ne 'completed')
 
-    # A run that found nothing is a failure, not a pass. When the test list comes
-    # back empty - an assembly that failed to compile, or a filter that matches
-    # nothing - the runner writes "completed" with every counter at zero, and a
-    # bare passed-ne-total check reads 0 -ne 0 as success and turns the whole gate
-    # green. The previous shape of this script caught that with a null check on
-    # the summary; this replaces it with one that also catches an empty run.
-    if ([int]$Status.summary.total -le 0) {
-        throw "Unity $Mode reported no tests at all. An assembly that fails to " +
-              "compile reaches here as an empty run, which is not a pass."
-    }
-
-    $Passed = [int]$Status.summary.passed
-    $Total = [int]$Status.summary.total
-    $Failed = [int]$Status.summary.failed
-    $Skipped = [int]$Status.summary.skipped
-    $Inconclusive = [int]$Status.summary.inconclusive
-
-    # The skip count is printed whenever it is non-zero, so a tier that quietly
-    # stopped running can never be invisible in a green log. A bare "149/152
-    # passed." reads like a partial failure; "149/152 passed, 3 skipped." says
-    # what actually happened.
-    $Line = "$($Mode): $Passed/$Total passed"
-    if ($Skipped -gt 0) {
-        $Line += ", $Skipped skipped"
-    }
-    Write-Host "$Line."
-
-    if ($Failed -gt 0 -or $Inconclusive -gt 0) {
-        $Failures = @(
-            $Status.results |
-                Where-Object Status -eq 'Failed' |
-                ForEach-Object { "$($_.FullName): $($_.Message)" }
-        )
-        throw @"
-$Mode did not pass every test: passed=$Passed, total=$Total, failed=$Failed,
-skipped=$Skipped, inconclusive=$Inconclusive.
-Failures:
- - $($Failures -join "`n - ")
-"@
-    }
-
-    # Every test must be accounted for. Without this a result that is neither
-    # passed, failed, skipped nor inconclusive - or a summary that simply does not
-    # add up - would slip through the two checks around it.
-    if ($Passed + $Skipped -ne $Total) {
-        throw @"
-$Mode did not account for every test: passed=$Passed, skipped=$Skipped,
-total=$Total.
-"@
-    }
-
-    # One sanctioned skip, and no more. `passed -ne total` used to fail the gate
-    # outright, which was right for a suite where nothing may skip; the end-to-end
-    # tier changed that, because its endpoint is deliberately not committed and so
-    # every machine that has not opted in - CI included - skips it. Tolerating it
-    # by class rather than by a blanket "skips are fine" rule keeps the invariant
-    # that matters: a test which quietly stops running anywhere else still fails
-    # the gate, and gets named while doing it.
-    if ($Skipped -gt 0) {
-        $Unsanctioned = @(
-            $Status.results |
-                Where-Object Status -eq 'Skipped' |
-                Where-Object { $_.FullName -notlike "$SanctionedSkipClass.*" } |
-                ForEach-Object { "$($_.FullName): $($_.Message)" }
-        )
-        if ($Unsanctioned.Count -gt 0) {
-            throw @"
-$Mode skipped $($Unsanctioned.Count) test(s) outside $SanctionedSkipClass, which
-is the only class allowed to skip itself. A test that stops running is not a
-pass:
- - $($Unsanctioned -join "`n - ")
-"@
-        }
-    }
-
-    return $Status.summary
+    return Assert-UnityTestRunPassed `
+        -Mode $Mode `
+        -Summary $Status.summary `
+        -Results $Status.results
 }
 
 function Wait-ForUnityCompile {
@@ -225,6 +368,18 @@ function Wait-ForUnityCompile {
     # mid-reload.
     $Deadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
     do {
+        # First in the block, not last, and the placement is the whole of the
+        # guard. PowerShell's `continue` inside do{}while() jumps to the CONDITION,
+        # which here is $true, so everything below the unreachable-editor branch
+        # was skipped for as long as that branch kept being taken. An editor that
+        # died during a domain reload is unreachable forever, and this loop spun in
+        # 500 ms sleeps with nothing left that could ever end it. The sibling loop
+        # in Invoke-ConnectedUnityTestMode already checks its deadline first; this
+        # matches it, and a check that cannot be jumped over cannot be missed.
+        if ([DateTimeOffset]::UtcNow -ge $Deadline) {
+            throw 'Timed out waiting for Unity to finish compiling and reloading.'
+        }
+
         Start-Sleep -Milliseconds 500
 
         $StatusOutput = & $UnityCli.Source --json command --project-path $ProjectRoot editor_status
@@ -243,24 +398,34 @@ function Wait-ForUnityCompile {
                 break
             }
         }
-
-        if ([DateTimeOffset]::UtcNow -ge $Deadline) {
-            throw 'Timed out waiting for Unity to finish compiling and reloading.'
-        }
     } while ($true)
 
     # Read after the editor settles, not during. A compile that finished with
     # errors is reported here as compile errors rather than as whatever the stale
     # test list happens to do next.
+    #
+    # A failed read throws, exactly as the recompile call above does. It used to be
+    # wrapped in `if ($LASTEXITCODE -eq 0)`, so a recompile_status that failed for
+    # any reason skipped the compile-error check silently and the run continued.
+    # That is not a small hole: when compilation fails the assemblies on disk are
+    # the PREVIOUS good ones, so run_tests answers with a full, all-passing, stale
+    # list that satisfies the empty-run guard, the accounting check and the skip
+    # check alike. It reopens precisely the false-pass class this wait exists to
+    # close. Not knowing whether the compile succeeded has to fail the gate.
     $CompileStatusOutput = & $UnityCli.Source --json command --project-path $ProjectRoot recompile_status
-    if ($LASTEXITCODE -eq 0) {
-        $CompileStatus = (ConvertFrom-NativeJson $CompileStatusOutput).data.result | ConvertFrom-Json
-        if ($CompileStatus.failed) {
-            throw @"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unity Pipeline recompile_status exited with code $LASTEXITCODE, so " +
+              "whether the scripts compiled is unknown. A failed compile leaves the " +
+              "previous assemblies in place and the whole suite passes against code " +
+              "that was never built."
+    }
+
+    $CompileStatus = (ConvertFrom-NativeJson $CompileStatusOutput).data.result | ConvertFrom-Json
+    if ($CompileStatus.failed) {
+        throw @"
 Unity scripts failed to compile:
  - $($CompileStatus.errors -join "`n - ")
 "@
-        }
     }
 }
 
@@ -275,14 +440,7 @@ function Invoke-ConnectedUnityTests {
     $EditMode = Invoke-ConnectedUnityTestMode $UnityCli 'EditMode'
     $PlayMode = Invoke-ConnectedUnityTestMode $UnityCli 'PlayMode'
 
-    $Result = [ordered]@{
-        runner = 'connected-editor'
-        editMode = $EditMode
-        playMode = $PlayMode
-    }
-    $Result | ConvertTo-Json -Depth 8 |
-        Set-Content -LiteralPath (Join-Path $ArtifactsDirectory 'unity-test-summary.json') `
-            -Encoding utf8
+    Write-UnityTestSummary -Runner 'connected-editor' -EditMode $EditMode -PlayMode $PlayMode
 }
 
 function Invoke-BatchModeUnityTests {
@@ -327,17 +485,31 @@ function Invoke-BatchModeUnityTests {
         }
     }
 
+    $Summaries = [ordered]@{}
     foreach ($Mode in @('EditMode', 'PlayMode')) {
         $ResultPath = Join-Path $ArtifactsDirectory "$Mode-results.xml"
         $LogPath = Join-Path $ArtifactsDirectory "$Mode-unity.log"
-        # No -quit. It is not merely redundant alongside -runTests, it is fatal:
-        # measured on this project, -quit shuts the editor down before the test
-        # runner engages, so Unity exits 0, the log ends at "Batchmode quit
-        # successfully invoked - shutting down!", and no results XML is ever
-        # written. The script then throws "<Mode> did not produce ...", which fails
-        # loudly rather than passing falsely - but it means this fallback, the only
-        # path CI takes, could never run the suite at all. -runTests closes the
-        # editor itself once the run finishes.
+
+        # Deleted before the run, not merely overwritten by it. A previous run's
+        # XML left on disk is indistinguishable from this run's to every check
+        # below, so an editor that dies before writing results would otherwise be
+        # graded against whatever passed last time - the same stale-evidence
+        # false pass the compile wait exists to close, arriving by another door.
+        Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+
+        # No -quit. It is not merely redundant alongside -runTests: it shuts the
+        # editor down before the test runner engages, so no results XML is ever
+        # written and this fallback - the only path CI takes - could never run the
+        # suite at all. -runTests closes the editor itself once the run finishes.
+        #
+        # An earlier version of this comment reported a measured batch narrative
+        # for that ("Unity exits 0, the log ends at 'Batchmode quit successfully
+        # invoked - shutting down!'"). It should not have. The one batch log in
+        # the tree predates this work, still carries -quit, and ends with return
+        # code 1, contradicting both halves; whatever produced that narrative left
+        # no artifact behind. The -quit reasoning above is the Unity documented
+        # behaviour and the reason the flag is absent, and it is stated as that
+        # rather than as something this repository observed.
         $Arguments = @(
             '-batchmode'
             '-nographics'
@@ -359,13 +531,33 @@ function Invoke-BatchModeUnityTests {
             -WindowStyle Hidden `
             -Wait `
             -PassThru
-        if ($Process.ExitCode -ne 0) {
-            throw "$Mode tests failed with exit code $($Process.ExitCode). See $LogPath."
-        }
         if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-            throw "$Mode did not produce $ResultPath."
+            throw ("$Mode did not produce $ResultPath (editor exit code " +
+                "$($Process.ExitCode)). See $LogPath.")
+        }
+
+        # Graded before the exit code is consulted, deliberately. A run with
+        # failures exits non-zero, and "exit code 2" names nothing; the XML names
+        # the tests. The exit code is still checked, below, because a run whose
+        # results parse clean and whose editor then died is not a pass either -
+        # that is the one thing the XML cannot say.
+        $Run = ConvertFrom-NUnitResultsXml $ResultPath
+        $Summaries[$Mode] = Assert-UnityTestRunPassed `
+            -Mode $Mode `
+            -Summary $Run.summary `
+            -Results $Run.results
+
+        if ($Process.ExitCode -ne 0) {
+            throw ("$Mode tests exited with code $($Process.ExitCode) even though " +
+                "$ResultPath grades clean, so the editor failed outside the run " +
+                "itself. See $LogPath.")
         }
     }
+
+    Write-UnityTestSummary `
+        -Runner 'batchmode' `
+        -EditMode $Summaries['EditMode'] `
+        -PlayMode $Summaries['PlayMode']
 }
 
 $Connected = $false

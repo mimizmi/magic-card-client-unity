@@ -18,7 +18,7 @@ Go repository baseline.
 | Fixture generator | `go test ./...` in `Tools/protocol` | the generator that produces `protocol.contract.json` is itself correct | console |
 | Architecture | `verify-architecture.ps1` | editor revision, package pins, asmdef direction and purity flags, source restrictions, 39 IDs, frame rules | console |
 | Protocol drift | `verify-architecture.ps1` → `go run . -check` in `Tools/protocol` | the checked-in `protocol.contract.json` still matches the Go server byte for byte | console |
-| Unity tests | `run-unity-tests.ps1` | EditMode and PlayMode suites both have zero failures | `Artifacts/unity-test-summary.json` when connected; XML/logs in batchmode |
+| Unity tests | `run-unity-tests.ps1` | EditMode and PlayMode suites both have zero failures, no empty run, and no skip outside the one sanctioned class | `Artifacts/unity-test-summary.json` on both paths; XML/logs additionally in batchmode |
 | Go baseline | `go test ./...` | existing authoritative server remains green | console |
 | Aggregate | `verify.ps1` | all gates above | `Artifacts/verification-summary.md` |
 
@@ -69,6 +69,35 @@ unrelated reason.
 | Every dispatched message hops to the session's context before anything reads or writes session state | `ProtocolSessionConfinementTests` (four tests) | **Mutation-verified.** Confinement, not locking, is what makes a plain `Dictionary` of pending requests and a plain `State` property safe once a real socket introduces a second thread — including the request timeout, which fires on a thread-pool thread and must hop before its `finally` touches the single-flight gate. |
 | `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests` (PlayMode, four tests) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. Nothing constructs this type in production yet — see the open checklist item — so PlayMode is currently its only consumer. |
 | Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode, three tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
+
+### The two runners are graded by one function, with one difference
+
+`run-unity-tests.ps1` has two paths — a connected Unity editor and a batchmode
+fallback — and CI takes the batch one (`-PreferConnectedEditor:$false`). The batch
+path used to verify nothing but the editor's exit code and the existence of the
+results XML, which it never opened. So none of the gate's real checks existed on
+the path CI actually runs: no empty-run guard, no accounting, no skip count, and
+no sanctioned-skip check — and CI is permanently in the skip state, which is the
+one state that check exists to police.
+
+Both paths now call the same `Assert-UnityTestRunPassed`, the batch path feeding it
+the NUnit XML reshaped into the connected producer's shape, and both write
+`Artifacts/unity-test-summary.json`.
+
+**One check is weaker on the batch path, and it is named here rather than
+generalised away.** The connected path receives a summary and a result list from
+two different places in the Unity Pipeline package, so comparing them is a real
+cross-check — it is what catches `summary.skipped = 1` with the row absent, or a
+row labelled `Ignored` instead of `Skipped`, both of which used to pass. The batch
+path has only one producer: the summary is *derived* from the `test-case` rows, so
+the accounting check and the skipped-row cross-check compare a derivation against
+itself and cannot catch a miscount. That is deliberate. The alternative is trusting
+the `test-run` element's own `total`, whose NUnit 3 semantics for skipped, ignored
+and explicit tests differ from this producer's — and measuring it would mean
+running batchmode against a project a developer keeps open, which is how a real
+editor session was destroyed during this iteration. Everything else — empty run,
+named failures, the skip count in the log, and the sanctioned-skip check — grades
+identically on both paths.
 
 ### What the heartbeat test can and cannot see
 
