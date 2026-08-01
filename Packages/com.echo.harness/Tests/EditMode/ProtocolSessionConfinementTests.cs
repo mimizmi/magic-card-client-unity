@@ -144,6 +144,59 @@ namespace Echo.Harness.Tests.EditMode
                 Does.Contain(SessionFaultKind.UnknownMessageId));
         }
 
+        /// <summary>
+        /// The teardown hop is allowed to fail, and what it may not do is take the
+        /// caller's report with it. Before the swallow existed this path was
+        /// unguarded: the hop's exception replaced the TimeoutException, and the
+        /// caller was told its bookkeeping had failed rather than that its deadline
+        /// had elapsed. Nothing pinned that, so this and its sibling below do.
+        /// </summary>
+        [Test]
+        public void AFailingTeardownHopDoesNotReplaceTheTimeout()
+        {
+            using var session = CreateStarted(out _, out var scheduler, out _);
+
+            // Nothing is enqueued on the transport in this test, so the pump is
+            // parked in ReceiveAsync and cannot consume this one-shot first.
+            scheduler.NextFailure = new InvalidOperationException("no player loop");
+
+            Assert.Throws<TimeoutException>(
+                () => session.RequestAsync<LoginResponseDto>(
+                    MessageId.LoginRequest,
+                    new LoginRequestDto { PlayerName = "redacted" },
+                    TimeSpan.FromMilliseconds(50),
+                    CancellationToken.None).AsTask().GetAwaiter().GetResult(),
+                "A hop that cannot happen is a bookkeeping failure. The caller's " +
+                "deadline elapsing is the thing it can act on, and it must be what " +
+                "it is told.");
+        }
+
+        /// <summary>
+        /// The cancellation half of the test above. Both exits hop, so both can
+        /// have their exception overwritten by a failing hop, and the two are
+        /// distinguishable only by which exception survives.
+        /// </summary>
+        [Test]
+        public void AFailingTeardownHopDoesNotReplaceTheCallerCancellation()
+        {
+            using var session = CreateStarted(out _, out var scheduler, out _);
+            using var cancellation = new CancellationTokenSource();
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(30),
+                cancellation.Token).Preserve();
+
+            scheduler.NextFailure = new InvalidOperationException("no player loop");
+            cancellation.Cancel();
+
+            Assert.Throws<OperationCanceledException>(
+                () => pending.GetAwaiter().GetResult(),
+                "A caller that abandoned its request must still be told that is " +
+                "what happened, whatever the hop out did.");
+        }
+
         [Test]
         public void AFailingHopFaultsTheStreamRatherThanDyingUnobserved()
         {

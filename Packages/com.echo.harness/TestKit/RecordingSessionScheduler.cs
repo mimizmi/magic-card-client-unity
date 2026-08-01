@@ -54,7 +54,17 @@ namespace Echo.Harness.TestKit
             }
         }
 
-        /// <summary>Makes the next switch fail. One-shot.</summary>
+        /// <summary>
+        /// Makes the next switch fail. One-shot - it is cleared by whichever switch
+        /// reaches it first, and it now has two possible consumers rather than one.
+        /// The receive pump hops once per inbound message, and a failing request
+        /// hops again on its way out through
+        /// <c>SwitchToSessionContextForTeardownAsync</c>. So a test arming this
+        /// expecting the pump to fail can have it eaten by a request teardown that
+        /// ran first, leaving the pump to hop successfully and the test to assert
+        /// against a session that never faulted. Arm it with only one of the two in
+        /// flight.
+        /// </summary>
         public Exception NextFailure { get; set; }
 
         public UniTask SwitchToSessionContextAsync(CancellationToken cancellationToken)

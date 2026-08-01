@@ -104,10 +104,14 @@ namespace Echo.Harness.Application
         /// than zero - so a step landing inside a probe fails that test with a
         /// negative latency and nothing to say where the number came from.</para>
         ///
-        /// <para>No test can catch a non-monotonic implementation, because the
-        /// requirement is on the implementation rather than on any call site. That is
-        /// why it is stated here, and why a new IClock is the wrong place to be
-        /// clever.</para>
+        /// <para>No test can RELIABLY catch a non-monotonic implementation, because
+        /// the requirement is on the implementation rather than on any call site.
+        /// The end-to-end assertion named above is the whole of what exists, and it
+        /// only fires when a step happens to land inside the probe's own few
+        /// milliseconds - so it is non-deterministic, and when it does fire it
+        /// reports a negative latency rather than a clock that moved. That is why
+        /// the requirement is stated here, and why a new IClock is the wrong place
+        /// to be clever.</para>
         /// </summary>
         DateTimeOffset UtcNow { get; }
     }

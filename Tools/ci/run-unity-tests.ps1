@@ -100,13 +100,22 @@ Failures:
 "@
     }
 
-    # Kept as defence against a future producer, not because it catches anything
-    # today. It used to claim it caught "a result that is neither passed, failed,
-    # skipped nor inconclusive"; against both producers here `total` is defined as
-    # the sum of those four counters, which makes this condition algebraically
-    # `failed + inconclusive -ne 0` and therefore already handled immediately
-    # above. A producer that ever grows a fifth outcome, or one whose total counts
-    # discovered tests rather than summing results, is what this is for.
+    # Dead against one producer and load-bearing against the other, and which is
+    # which is the opposite of what an earlier version of this comment said.
+    #
+    # Connected path: PipelineTestRunner defines total as
+    # PassCount + FailCount + SkipCount + InconclusiveCount, so this condition is
+    # algebraically `failed + inconclusive -ne 0` and the throw immediately above
+    # has already fired. Dead there, kept for a producer that grows a fifth
+    # outcome or counts discovered tests instead of summing results.
+    #
+    # Batch path - the one CI takes: ConvertFrom-NUnitResultsXml sets total to the
+    # ROW COUNT, and the four counters are independent filters over those same
+    # rows. A row carrying any result string the filters do not recognise is
+    # counted by total and by none of them. Measured: a results file holding
+    # <test-case result="Warning"/> reaches here as failed=0, inconclusive=0 and
+    # passes the check above untouched; this one is the only thing that catches it
+    # (`passed=1, skipped=0, total=2`). Do not delete it as redundant.
     if ($Passed + $Skipped -ne $Total) {
         throw @"
 $Mode did not account for every test: passed=$Passed, skipped=$Skipped,
@@ -175,10 +184,14 @@ pass:
 # rows are what the sanctioned-skip check needs anyway.
 #
 # The consequence is written down in docs/verification-matrix.md rather than left
-# implied: on the batch path the accounting check and the skipped-row cross-check
-# compare a derivation against itself, so neither can catch a producer that
-# miscounts. Everything else - the empty-run guard, named failures, the skip
-# count, and the sanctioned-skip check - grades identically on both paths.
+# implied, and it is one check rather than two. The skipped-row cross-check runs
+# the identical filter on both sides here, so on this path it compares a
+# derivation against itself and cannot catch a miscount. The accounting check is
+# NOT in that class: total below is the row count, not the sum of the four
+# counters, so a row whose result string none of the filters recognise is caught
+# by it and by nothing else. Everything else - the empty-run guard, named
+# failures, the skip count, and the sanctioned-skip check - grades identically on
+# both paths.
 function ConvertFrom-NUnitResultsXml {
     param([string]$Path)
 
@@ -495,7 +508,18 @@ function Invoke-BatchModeUnityTests {
         # below, so an editor that dies before writing results would otherwise be
         # graded against whatever passed last time - the same stale-evidence
         # false pass the compile wait exists to close, arriving by another door.
+        #
+        # And asserted, because SilentlyContinue swallows the one failure that
+        # matters. A file another process holds open cannot be deleted, and the
+        # suppressed error left exactly the stale results this comment claims are
+        # gone - the guard silently doing nothing while reading as though it had.
+        # The suppression stays for the ordinary case of the file not existing.
         Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $ResultPath) {
+            throw ("$ResultPath survived deletion, so this run would be graded " +
+                'against the previous run results. Something is holding that ' +
+                'file open - close it and re-run.')
+        }
 
         # No -quit. It is not merely redundant alongside -runTests: it shuts the
         # editor down before the test runner engages, so no results XML is ever

@@ -171,9 +171,14 @@ namespace Echo.Harness.Tests.EditMode
                     // working round trip hold for both.
                     Assert.That(transport.PongsSent, Is.GreaterThan(0),
                         "The server sends a Ping every 15 seconds and this test waits " +
-                        "past one of them, so at least one Pong must have reached the " +
-                        "wire. Counted rather than bounded: connect latency decides " +
-                        "whether the second interval also lands inside the window.");
+                        "past one of them, so the session must have composed at least " +
+                        "one Pong and handed it to a socket that accepted it. The " +
+                        "count is taken after WriteAsync and FlushAsync return, which " +
+                        "proves the write was accepted locally rather than that the " +
+                        "bytes reached the peer - the round trip below is what shows " +
+                        "the link was still carrying traffic. Counted rather than " +
+                        "bounded: connect latency decides whether the second interval " +
+                        "also lands inside the window.");
 
                     Assert.That(session.State, Is.EqualTo(SessionState.Connected),
                         "The reply above was written; this says the link survived it.");

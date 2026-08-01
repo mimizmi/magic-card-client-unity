@@ -90,19 +90,33 @@ two different places in the Unity Pipeline package, so comparing them is a real
 cross-check — it is what catches `summary.skipped = 1` with the row absent, or a
 row labelled `Ignored` instead of `Skipped`, both of which used to pass. The batch
 path has only one producer: the summary is *derived* from the `test-case` rows, so
-the accounting check and the skipped-row cross-check compare a derivation against
-itself and cannot catch a miscount. That is deliberate. The alternative is trusting
+the skipped-row cross-check runs the identical filter on both sides and cannot
+catch a miscount. That is deliberate. The alternative is trusting
 the `test-run` element's own `total`, whose NUnit 3 semantics for skipped, ignored
 and explicit tests differ from this producer's — and measuring it would mean
 running batchmode against a project a developer keeps open, which is how a real
-editor session was destroyed during this iteration. Everything else — empty run,
-named failures, the skip count in the log, and the sanctioned-skip check — grades
-identically on both paths.
+editor session was destroyed during this iteration.
+
+The **accounting check is the exception, and it runs the other way round.** On the
+connected path it is dead: `PipelineTestRunner` defines `total` as the sum of the
+four counters, so `passed + skipped ≠ total` reduces to `failed + inconclusive ≠ 0`,
+which the check above it has already caught. On the batch path `total` is the row
+count and the four counters are independent filters over those rows, so a row
+carrying a result string none of them recognises is counted by `total` alone.
+Measured: a results file holding `<test-case result="Warning"/>` arrives as
+`failed=0, inconclusive=0` and is caught only here —
+`EditMode did not account for every test: passed=1, skipped=0, total=2.` On the path
+CI actually takes it is the sole guard against an unrecognised result state.
+
+Everything else — empty run, named failures, the skip count in the log, and the
+sanctioned-skip check — grades identically on both paths.
 
 ### What the heartbeat test can and cannot see
 
-`TheClientAnswersARealServerHeartbeat` waits 25 s and asserts a `Pong` reached the
-wire. That last part is the whole test. Its other three assertions — the session is
+`TheClientAnswersARealServerHeartbeat` waits 25 s and asserts a `Pong` was composed
+and accepted by the socket — the count is taken after `WriteAsync`/`FlushAsync`
+return, which is local acceptance rather than proof of delivery to the peer. That
+last part is the whole test. Its other three assertions — the session is
 still `Connected`, no fault was published, a round trip still completes — cannot
 fail for a client that never answered, and this was measured rather than argued:
 with `ProtocolSession`'s heartbeat reply removed entirely, all three still passed.

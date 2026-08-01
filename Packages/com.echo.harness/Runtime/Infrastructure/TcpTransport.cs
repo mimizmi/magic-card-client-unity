@@ -346,10 +346,10 @@ namespace Echo.Harness.Infrastructure
             // What a fix would cost, stated correctly this time. An earlier version
             // of this note justified leaving it by saying the fix "puts shared
             // mutable state into a class that has deliberately avoided any". That is
-            // simply false about this class: it has four volatile fields and a
-            // SemaphoreSlim, and the header seventeen lines of comment above them
-            // spends its whole length documenting cross-thread races on exactly
-            // those fields. The fix is also cheaper than that made it sound - a
+            // simply false about this class: it has five volatile fields and a
+            // SemaphoreSlim, and the thirteen-line header comment standing over
+            // four of them spends its whole length documenting cross-thread races
+            // on exactly those fields - the fifth, budget, carries its own. The fix is also cheaper than that made it sound - a
             // per-call int local, captured by turning the registration below into a
             // closure and claimed with Interlocked.CompareExchange, adding no field
             // to the class at all. What it costs is an allocation per receive and

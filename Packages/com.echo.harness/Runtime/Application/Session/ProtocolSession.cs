@@ -279,10 +279,12 @@ namespace Echo.Harness.Application
         /// exactly when the hop matters most - handing it in would make the switch
         /// refuse to happen at the moment it is needed. It is not a hypothetical
         /// either way: RecordingSessionScheduler returns an already-cancelled
-        /// UniTask without switching at all, and MainThreadSessionScheduler off the
-        /// main thread queues on the player loop regardless and only consults the
-        /// token once the continuation has already arrived. Passing None is what
-        /// makes both implementations perform the switch this method exists for.</para>
+        /// UniTask without switching at all, so for that one the token decides
+        /// whether a switch happens. MainThreadSessionScheduler is not the same
+        /// case - off the main thread it queues on the player loop regardless of
+        /// the token, and None only stops GetResult throwing once the continuation
+        /// has already landed. So None is what makes the first switch at all and
+        /// what makes the second's completed switch observable.</para>
         ///
         /// <para><b>A failing hop is swallowed, and that is a trade rather than an
         /// oversight.</b> The exception the caller must be told about is the timeout
@@ -291,9 +293,29 @@ namespace Echo.Harness.Application
         /// replace a report the caller can act on with one it cannot. What is lost
         /// is real and is stated here because there is nowhere else to state it: when
         /// the hop fails, the <c>finally</c> runs off-context after all, unreported.
-        /// There is no better landing place for it. PublishFault would iterate
-        /// faultHandlers from the very thread this hop failed to leave, which is the
-        /// same class of race the hop exists to prevent.</para>
+        /// There is a precedent for the alternative and it is worth naming rather
+        /// than arguing past: FaultTheStreamAsync does publish from the very thread
+        /// a failing pump hop could not leave, and a test pins it
+        /// (AFailingHopFaultsTheStreamRatherThanDyingUnobserved). The reason not to
+        /// copy it here is what the two paths owe their caller. The pump has nobody to return an exception
+        /// to, so an off-context fault beats silence; this frame does have somebody,
+        /// and that caller's report is worth more than a second one that would race
+        /// faultHandlers from the thread the hop failed to leave.</para>
+        ///
+        /// <para><b>The failure a swallow cannot reach.</b> Everything above is
+        /// about a hop that <i>throws</i>. A hop that never completes is outside it
+        /// entirely: with MainThreadSessionScheduler, a Cancel() from a non-main
+        /// thread and a stopped player loop, the await below never resumes.
+        /// RequestAsync never returns, the finally never runs, and this request's
+        /// entry stays in pendingRequests for good - so every later request for the
+        /// same response id throws RequestAlreadyInFlightException, and neither
+        /// Dispose nor CancelPump can free it. On the caller-cancel path that
+        /// exposure is NEW: before this hop existed, a cancelled caller returned
+        /// promptly and took no hop at all. The timeout path already had it, so
+        /// CancellationToken.None makes nothing there worse. It is narrow today only
+        /// because nothing in production constructs MainThreadSessionScheduler - see
+        /// the open item in docs/migration-checklist.md - and it stops being narrow
+        /// on the day something does.</para>
         /// </summary>
         private async UniTask SwitchToSessionContextForTeardownAsync()
         {
@@ -304,6 +326,8 @@ namespace Echo.Harness.Application
             catch (Exception)
             {
                 // See above: nothing here may outrank the failure being reported.
+                // AFailingTeardownHopDoesNotReplaceTheTimeout and its cancellation
+                // sibling are what hold this catch in place.
             }
         }
 

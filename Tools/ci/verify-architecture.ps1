@@ -142,9 +142,12 @@ $ExpectedRuntimeReferences = [ordered]@{
 # overrideReferences because an override is only as strong as the list it
 # substitutes -- adding R3.dll there would reopen exactly the hole above.
 #
-# The [bool] casts mean a DELETED key is compared against Unity's own default
-# for that key (false), so the gate pins effective behaviour rather than JSON
-# shape.
+# Read through Get-AsmdefFlag, so a DELETED key is compared against Unity's own
+# default for that key rather than against $false. Both flags here happen to
+# default to false, which is why the bare [bool] casts this loop used to carry
+# were not visibly wrong; autoReferenced below is where that shortcut broke, and
+# the helper is shared so the two loops cannot drift apart again. The gate pins
+# effective behaviour rather than JSON shape.
 $ExpectedRuntimeAssemblyFlags = [ordered]@{
     'Echo.Harness.Domain' = @{
         NoEngineReferences = $true
@@ -237,6 +240,16 @@ foreach ($AsmdefFile in $RuntimeAsmdefs) {
 #                      assemblies differ from each other - EditMode is Editor-only,
 #                      PlayMode is not - and that asymmetry is deliberate, so a
 #                      uniform expectation would be wrong.
+#
+# So "each of these fails closed" is true of the first two and not of the third,
+# and the difference is worth being exact about. Deleting the includePlatforms key
+# from TestKit or from Tests.PlayMode leaves this gate GREEN: @($null) sorts to
+# empty and matches their expected @(). It fails closed only for
+# Tests.EditMode, whose expectation is non-empty. That is not a hole being
+# tolerated - absent and [] are the same thing to Unity, both meaning every
+# platform, so the deletion changes no behaviour and there is nothing to fail on.
+# It is the same rule Get-AsmdefFlag follows: pin the effective value, not the JSON
+# shape. Detecting key presence here would fail the gate on a no-op edit.
 #
 # TestKit's references are pinned too, and the test assemblies' are not. TestKit
 # is a dependency of production-shaped code and its direction matters: it may not
