@@ -50,6 +50,28 @@ function Assert-SetEqual {
     }
 }
 
+# An asmdef key's EFFECTIVE value, which is not the same as the value written in
+# the file. A deleted key falls back to Unity's own default, and those defaults
+# are not uniform: noEngineReferences and overrideReferences default to false,
+# but autoReferenced defaults to TRUE. A bare [bool] cast reads a missing key as
+# $false either way, so pinning autoReferenced that way would let the one-line
+# deletion that ships an assembly into every build compare equal to the flag that
+# was supposed to prevent it. The default has to be passed in.
+function Get-AsmdefFlag {
+    param(
+        $Asmdef,
+        [string]$Name,
+        [bool]$UnityDefault
+    )
+
+    $Property = $Asmdef.PSObject.Properties[$Name]
+    if ($null -eq $Property -or $null -eq $Property.Value) {
+        return $UnityDefault
+    }
+
+    return [bool]$Property.Value
+}
+
 $VersionFile = Join-Path $ProjectRoot 'ProjectSettings\ProjectVersion.txt'
 $VersionLines = Get-Content -LiteralPath $VersionFile
 Assert-True ($VersionLines -contains 'm_EditorVersion: 6000.2.7f2') `
@@ -174,16 +196,113 @@ foreach ($AsmdefFile in $RuntimeAsmdefs) {
         "Runtime assembly '$($Asmdef.name)' must not depend on TestKit."
 
     $ExpectedFlags = $ExpectedRuntimeAssemblyFlags[$Asmdef.name]
-    Assert-Equal ([bool]$Asmdef.noEngineReferences) $ExpectedFlags.NoEngineReferences `
+    Assert-Equal (Get-AsmdefFlag $Asmdef 'noEngineReferences' $false) `
+        $ExpectedFlags.NoEngineReferences `
         ("noEngineReferences changed for '$($Asmdef.name)'; that flag, not the " +
             'reference list, is what decides whether the assembly can compile ' +
             'against UnityEngine at all.')
-    Assert-Equal ([bool]$Asmdef.overrideReferences) $ExpectedFlags.OverrideReferences `
+    Assert-Equal (Get-AsmdefFlag $Asmdef 'overrideReferences' $false) `
+        $ExpectedFlags.OverrideReferences `
         ("overrideReferences changed for '$($Asmdef.name)'; that flag is what " +
             'stops every auto-referenced precompiled assembly in the project ' +
             'from becoming usable from this assembly.')
     Assert-SetEqual @($Asmdef.precompiledReferences) @($ExpectedFlags.PrecompiledReferences) `
         "precompiledReferences changed for '$($Asmdef.name)'."
+}
+
+# The assemblies this gate used to be blind to.
+#
+# Everything above enumerates Packages\com.echo.harness\Runtime only, so
+# Echo.Harness.TestKit and the two test assemblies were never opened. That was
+# tolerable while TestKit held nothing but fakes. It is not now: TestKit contains
+# LoopbackProtocolServer, which binds a real TcpListener on loopback and spawns a
+# background reader thread, and RemoteServerEndpoint, which resolves a developer
+# server address out of the environment. The only things keeping either of them
+# out of a player build are two keys in TestKit's own unchecked asmdef -
+# "autoReferenced": false and "defineConstraints": ["UNITY_INCLUDE_TESTS"]. Delete
+# one line from that JSON file and both ship, with this script still printing
+# "Architecture verification passed."
+#
+# So the three pinned keys are exactly the three that decide reachability:
+#
+#   defineConstraints  compiles the assembly out entirely unless the constraint
+#                      is defined. This is the load-bearing one; UNITY_INCLUDE_TESTS
+#                      is not defined in a player build.
+#   autoReferenced     stops every other assembly in the project from seeing this
+#                      one without asking. Note its Unity default is TRUE, which is
+#                      why Get-AsmdefFlag exists.
+#   includePlatforms   pinned as a FACT rather than as a protection. TestKit's is
+#                      empty, meaning every platform; recording that here means a
+#                      change to it is noticed rather than assumed. The two test
+#                      assemblies differ from each other - EditMode is Editor-only,
+#                      PlayMode is not - and that asymmetry is deliberate, so a
+#                      uniform expectation would be wrong.
+#
+# TestKit's references are pinned too, and the test assemblies' are not. TestKit
+# is a dependency of production-shaped code and its direction matters: it may not
+# grow a reference to Bootstrap or Presentation, and it may not quietly acquire a
+# new engine or third-party dependency. The test assemblies reference nearly
+# everything by design, and a gate that fired on every legitimate addition there
+# would only teach people to edit the gate.
+$ExpectedHarnessAssemblies = [ordered]@{
+    'Echo.Harness.TestKit' = @{
+        AutoReferenced = $false
+        DefineConstraints = @('UNITY_INCLUDE_TESTS')
+        IncludePlatforms = @()
+        References = @(
+            'Echo.Harness.Domain',
+            'Echo.Harness.Contracts',
+            'Echo.Harness.Application',
+            'Echo.Harness.Infrastructure',
+            'UniTask')
+    }
+    'Echo.Harness.Tests.EditMode' = @{
+        AutoReferenced = $false
+        DefineConstraints = @('UNITY_INCLUDE_TESTS')
+        IncludePlatforms = @('Editor')
+        References = $null
+    }
+    'Echo.Harness.Tests.PlayMode' = @{
+        AutoReferenced = $false
+        DefineConstraints = @('UNITY_INCLUDE_TESTS')
+        IncludePlatforms = @()
+        References = $null
+    }
+}
+
+$HarnessAsmdefs = @(
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'Packages\com.echo.harness') `
+        -Recurse -Filter '*.asmdef' |
+        Where-Object { $_.FullName -notmatch '\\com\.echo\.harness\\Runtime\\' }
+)
+Assert-Equal $HarnessAsmdefs.Count $ExpectedHarnessAssemblies.Count `
+    ('The non-runtime harness assembly count changed without updating the ' +
+        'architecture gate. A new assembly under this package is exactly the ' +
+        'thing that must not arrive unexamined.')
+
+foreach ($AsmdefFile in $HarnessAsmdefs) {
+    $Asmdef = Get-Content -Raw -LiteralPath $AsmdefFile.FullName | ConvertFrom-Json
+    Assert-True $ExpectedHarnessAssemblies.Contains($Asmdef.name) `
+        "Unexpected harness assembly '$($Asmdef.name)' at $($AsmdefFile.FullName)."
+
+    $Expected = $ExpectedHarnessAssemblies[$Asmdef.name]
+    Assert-Equal (Get-AsmdefFlag $Asmdef 'autoReferenced' $true) $Expected.AutoReferenced `
+        ("autoReferenced changed for '$($Asmdef.name)'. It defaults to TRUE when " +
+            'the key is absent, so deleting the line makes this assembly visible ' +
+            'to every other assembly in the project.')
+    Assert-SetEqual @($Asmdef.defineConstraints) @($Expected.DefineConstraints) `
+        ("defineConstraints changed for '$($Asmdef.name)'. UNITY_INCLUDE_TESTS is " +
+            'the whole of what compiles this assembly out of a player build; ' +
+            'without it, a TcpListener and a developer server address ship.')
+    Assert-SetEqual @($Asmdef.includePlatforms) @($Expected.IncludePlatforms) `
+        ("includePlatforms changed for '$($Asmdef.name)'. Empty means every " +
+            'platform, so this is pinned to record which of these assemblies is ' +
+            'editor-only and which is not.')
+
+    if ($null -ne $Expected.References) {
+        Assert-SetEqual @($Asmdef.references) @($Expected.References) `
+            "Assembly references changed for '$($Asmdef.name)'."
+    }
 }
 
 $DomainSources = Get-ChildItem -LiteralPath (
