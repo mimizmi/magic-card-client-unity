@@ -1,8 +1,13 @@
 # Unity shutdown callback order — measured 2026-08-02
 
-Every line below was read out of a real console. Nothing here is recalled, inferred,
-or carried over from documentation. Where a path was not exercised, it says so and
-stays empty rather than borrowing another path's answer.
+Every line below was read out of a real console. No *measurement* here is recalled or
+inferred. Where a path was not exercised, it says so and stays empty rather than
+borrowing another path's answer.
+
+Two statements in this file are API shape rather than measurement, and both are marked
+`(API shape, not measured here)` where they appear. They are load-bearing — the whole
+disqualification of `Application.wantsToQuit` rests on the first — so they are called
+out rather than left to blend in with the log evidence.
 
 ## What was instrumented
 
@@ -70,7 +75,9 @@ measured to fire unconditionally, (ii) cannot be cancelled by another subscriber
 (iii) is not disqualified by a known artefact of the metric.
 
 `Application.wantsToQuit` wins the metric but fails (ii). It is a `Func<bool>` veto hook —
-a subscriber returning `false` aborts the quit. A latch armed there would close on a
+a subscriber returning `false` aborts the quit (API shape, not measured here; the probe
+registered it as a bool-returning handler but never exercised a `false` return). A latch
+armed there would close on a
 shutdown that may never happen, and any handler ordered ahead of it can cancel the very
 event the latch is reacting to. Winning a frame-counter comparison does not make a
 cancellable veto hook an installation point.
@@ -84,8 +91,9 @@ loop. It fires unconditionally once the quit is committed, which is what a latch
 `playModeStateChanged:ExitingPlayMode` is the latest point on this path with *positive*
 evidence of a live loop after it — a whole frame elapsed between it and `wantsToQuit`.
 It is sound corroboration and a usable earlier warning, but it is editor-only
-(`EditorApplication` does not exist in a player), so it cannot be the primary signal for
-code that must also run outside the editor.
+(`EditorApplication` does not exist in a player — API shape, not measured here; path C
+was never exercised, see below), so it cannot be the primary signal for code that must
+also run outside the editor.
 
 `EnteredEditMode` is listed because the probe's subscription outlives play mode
 (see "Subscription lifetime"), not because it is part of the shutdown sequence.
