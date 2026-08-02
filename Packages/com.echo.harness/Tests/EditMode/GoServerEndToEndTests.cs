@@ -220,7 +220,7 @@ namespace Echo.Harness.Tests.EditMode
         {
             var transport = new CountingTransport(new TcpTransport(
                 new TcpTransportOptions { Host = endpoint.Host, Port = endpoint.Port },
-                new SystemClock()));
+                new StopwatchElapsedTime()));
             ProtocolSession session = null;
             try
             {

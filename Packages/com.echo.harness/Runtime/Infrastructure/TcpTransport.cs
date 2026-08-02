@@ -11,7 +11,7 @@ namespace Echo.Harness.Infrastructure
     public sealed class TcpTransport : ITransport, IDisposable
     {
         private readonly TcpTransportOptions options;
-        private readonly IClock clock;
+        private readonly IElapsedTime time;
         private readonly byte[] header =
             new byte[WireFrameSpec.LengthPrefixBytes + WireFrameSpec.MessageIdBytes];
 
@@ -47,11 +47,15 @@ namespace Echo.Harness.Infrastructure
         //      any of the mobile targets may - interleaves two callers' frames
         //      and desynchronizes the stream. The server then reads a garbage
         //      length prefix and closes without an error frame.
-        //   3. SendBudget.TryConsume is a read-modify-write over an int and a
-        //      DateTimeOffset, and is not thread-safe on its own. The second is
-        //      the more dangerous half - it is wide enough to tear. This gate is
-        //      the whole of what makes it safe, and it is what keeps tokens in
-        //      wire order.
+        //   3. SendBudget.TryConsume is a read-modify-write over an int and two
+        //      longs, and is not thread-safe on its own. The tearing argument this
+        //      clause used to make no longer applies - it was about a
+        //      DateTimeOffset wide enough to tear, and that field is gone. What
+        //      remains is reason enough: a lost update to `tokens` or a stale
+        //      carry silently raises the effective send rate above the server's
+        //      hard limit, and exceeding it closes the connection with no error
+        //      frame. This gate is the whole of what makes it safe, and it is what
+        //      keeps tokens in wire order.
         //
         // Deliberately never disposed. SemaphoreSlim.Dispose does not release
         // waiters, so a sender parked in WaitAsync when Dispose ran would never be
@@ -88,10 +92,10 @@ namespace Echo.Harness.Infrastructure
         // connect, Host and Port are used once - so this was the one live read left.
         private readonly TimeSpan readIdleTimeout;
 
-        public TcpTransport(TcpTransportOptions options, IClock clock)
+        public TcpTransport(TcpTransportOptions options, IElapsedTime time)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
-            this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            this.time = time ?? throw new ArgumentNullException(nameof(time));
 
             // Rejected here, where the option can still be named. The deadline is
             // built on CancelAfter, which throws ArgumentOutOfRangeException on a
@@ -136,7 +140,7 @@ namespace Echo.Harness.Infrastructure
                 // Published ahead of the fields that advertise a usable transport,
                 // so a send can never find a Connected transport with no budget
                 // behind it.
-                budget = new SendBudget(options.SendBudgetPerSecond, clock);
+                budget = new SendBudget(options.SendBudgetPerSecond, time);
 
                 // Inside the try, not after it. Cancellation can fire between a
                 // successful connect and the registration being disposed, and the
@@ -322,9 +326,9 @@ namespace Echo.Harness.Infrastructure
             // server sends a Ping every 15 s, which is what makes silence
             // measurable at all.
             //
-            // Real time, not the injected IClock. CancelAfter runs off a timer and
-            // there is nothing to drive a virtual clock against a real socket, so
-            // this deliberately does not use `clock`. Do not "fix" that.
+            // Real time, not the injected IElapsedTime. CancelAfter runs off a
+            // timer and there is nothing to drive a virtual clock against a real
+            // socket, so this deliberately does not use `time`. Do not "fix" that.
             using var deadline =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 

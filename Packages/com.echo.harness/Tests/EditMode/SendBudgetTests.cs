@@ -55,6 +55,40 @@ namespace Echo.Harness.Tests.EditMode
                 "A long idle period must not build a burst the server will reject.");
         }
 
+        // The remainder invariant, pinned. With a 30/s budget the refill interval
+        // is 1/30 s. Advancing by 1.5 intervals nine times must yield 13 whole
+        // intervals of refill (13.5 truncated), not 9 - which is what a
+        // mark-set-to-now implementation gives, because it discards the
+        // half-interval remainder on every call.
+        [Test]
+        public void TryConsume_CarriesTheFractionalRemainderForward()
+        {
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            var budget = new SendBudget(30, time);
+
+            for (var i = 0; i < 30; i++)
+            {
+                Assert.That(budget.TryConsume(), Is.True, $"token {i} should have been available");
+            }
+
+            Assert.That(budget.TryConsume(), Is.False, "the bucket should be empty");
+
+            var oneAndAHalfIntervals = TimeSpan.FromTicks(
+                (TimeSpan.TicksPerSecond / 30) * 3 / 2);
+
+            var granted = 0;
+            for (var i = 0; i < 9; i++)
+            {
+                time.Advance(oneAndAHalfIntervals);
+                while (budget.TryConsume())
+                {
+                    granted++;
+                }
+            }
+
+            Assert.That(granted, Is.EqualTo(13));
+        }
+
         [Test]
         public void ANonPositiveBudgetIsRejected()
         {
