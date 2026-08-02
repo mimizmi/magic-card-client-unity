@@ -108,10 +108,42 @@ deliverable.
   volume. It replaced a silent drop, which is strictly better, but every event that
   arrives before its UI subscriber now publishes one; the first Phase 2 view will
   show whether that reads as signal or noise.
-- [ ] Give `MainThreadSessionScheduler` a DI registration. It is implemented and
-  PlayMode-tested but nothing constructs it, because `HarnessComposition` registers
-  only `HarnessRuntimeDescriptor` and session lifetime scopes are still undefined.
-- [ ] Add disposable-server golden integration tests.
+- [ ] Give the session stack a production wiring, and note that this is larger than
+  a DI registration. `HarnessComposition` registers only `HarnessRuntimeDescriptor`,
+  so nothing constructs `MainThreadSessionScheduler` — but the blocker underneath is
+  that **there is no production `IClock` at all**. Both implementations live in
+  `Echo.Harness.TestKit`, which carries `"defineConstraints": ["UNITY_INCLUDE_TESTS"]`,
+  and `TcpTransport` and `ProtocolSession` both require one in their constructors. As
+  it stands the transport, the session, the scheduler and the send budget cannot be
+  constructed in a player build. A shippable clock has to land before, or with, the
+  lifetime scopes.
+- [ ] Decide what a caller cancelling one receive should mean. `TcpTransport.ReceiveAsync`
+  closes the link on **any** cancellation of its token, not only on the idle deadline —
+  the socket close is what unparks a read this runtime cannot otherwise interrupt. A
+  consequence is that cancelling the token handed to `ProtocolSession.StartAsync`
+  destroys the transport as a side effect of asking the session to stop reading. That is
+  fine for shutdown and wrong for anything finer; whoever wires the pump needs a
+  separate mechanism rather than a tweak to `AbandonTheLink`.
+- [ ] Handle the scheduler's real failure mode, which is a stall rather than a throw.
+  `UniTask.SwitchToMainThread` queues its continuation on the player loop without
+  consulting the token, so when the loop stops — application quit, domain reload, or
+  leaving play mode — a pending hop never resumes and never throws. `ProtocolSession`
+  treats a failing hop as a fault it can publish; it has no answer for one that simply
+  never returns, and `Dispose`/`CancelPump` cannot free it.
+- [ ] Revisit the request-timeout hop's non-cancellation failure path. Carried from the
+  session-layer iteration and not closed there: if the teardown hop fails for a reason
+  other than cancellation, the `finally` still un-registers the gate entry while running
+  off-context, and no `SessionFault` is published. The exception the caller receives is
+  now correct; the bookkeeping is still unreported.
+- [ ] Guard `SendAsync` against a caller with no `SynchronizationContext`.
+  `Task.AsUniTask()` calls `TaskScheduler.FromCurrentSynchronizationContext()` eagerly,
+  so a send issued from a `Task.Run` or a thread-pool callback throws
+  `InvalidOperationException` before the write gate is even taken. Masked today only
+  because the Unity main thread always has a context.
+- [ ] Add disposable-server golden integration tests. Superseded in part: the end-to-end
+  tier now runs against a remote server via `ECHO_SERVER_HOST` rather than a disposable
+  local one, so what remains here is whatever a disposable server would cover that a
+  shared remote one cannot.
 - [ ] Define app/session/scene VContainer lifetime scopes.
 - [ ] Implement Addressables catalog environments, build profiles, release
   ownership, CDN credentials, rollback, and cache budgets.
