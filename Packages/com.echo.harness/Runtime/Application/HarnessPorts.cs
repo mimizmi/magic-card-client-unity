@@ -83,11 +83,26 @@ namespace Echo.Harness.Application
     ///
     /// <para><b>Do not measure an interval with this.</b> Wall time can step in
     /// either direction under a clock synchronisation or a manual change, so a
-    /// difference between two reads is not a duration. Use
-    /// <see cref="IElapsedTime"/>, which is why this interface no longer carries
-    /// the long warning it used to: the two call sites that measured intervals
-    /// through it - SendBudget's refill and the round-trip probe - have moved, so a
-    /// non-monotonic implementation no longer damages anything.</para>
+    /// difference between two reads is not a duration. <see cref="IElapsedTime"/>
+    /// is the port for that.</para>
+    ///
+    /// <para>Two call sites still do it anyway, today: SendBudget's refill and the
+    /// round-trip probe. They move to <see cref="IElapsedTime"/> in the two tasks
+    /// that follow this one, and until they do, a backwards step costs something
+    /// concrete. SendBudget.TryConsume computes
+    /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches a
+    /// whole interval; a negative elapsed never does, so once the bucket has
+    /// drained the budget wedges at zero and every send is refused until the wall
+    /// clock passes where it had already been. ProbeRoundTripAsync returns
+    /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
+    /// than zero, so a step landing inside a probe fails that test with a negative
+    /// latency and nothing to say where the number came from.</para>
+    ///
+    /// <para>Splitting the port moved that risk closer rather than further away,
+    /// which is worth knowing while it lasts. The only wall clock used to be the
+    /// one in TestKit, gated behind UNITY_INCLUDE_TESTS and unable to ship; there
+    /// is now a DateTimeOffset.UtcNow-backed implementation in player-shippable
+    /// Infrastructure, and both consumers named above still difference it.</para>
     /// </summary>
     public interface IClock
     {
