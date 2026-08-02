@@ -48,14 +48,16 @@ namespace Echo.Harness.Infrastructure
         //      and desynchronizes the stream. The server then reads a garbage
         //      length prefix and closes without an error frame.
         //   3. SendBudget.TryConsume is a read-modify-write over an int and two
-        //      longs, and is not thread-safe on its own. The tearing argument this
-        //      clause used to make no longer applies - it was about a
-        //      DateTimeOffset wide enough to tear, and that field is gone. What
-        //      remains is reason enough: a lost update to `tokens` or a stale
-        //      carry silently raises the effective send rate above the server's
-        //      hard limit, and exceeding it closes the connection with no error
-        //      frame. This gate is the whole of what makes it safe, and it is what
-        //      keeps tokens in wire order.
+        //      longs, and is not thread-safe on its own. C# guarantees atomic
+        //      reads and writes only up to 32 bits, and `long` is excluded, so
+        //      `lastFillTimestamp` and `carryTicks` can tear on a 32-bit runtime
+        //      - the IL2CPP ARM32 target named in clause 2 among them. Replacing
+        //      the DateTimeOffset narrowed that hazard rather than removing it: a
+        //      torn long now corrupts an interval, not a wall-clock moment.
+        //      Either that or a lost update to `tokens` silently raises the
+        //      effective send rate above the server's hard limit, and exceeding it
+        //      closes the connection with no error frame. This gate is the whole
+        //      of what makes it safe, and it is what keeps tokens in wire order.
         //
         // Deliberately never disposed. SemaphoreSlim.Dispose does not release
         // waiters, so a sender parked in WaitAsync when Dispose ran would never be
