@@ -56,14 +56,36 @@ Run A2 (~6 s in play mode):
 [ShutdownProbe] playModeStateChanged:EnteredEditMode | frame=1 | loop-STALLED
 ```
 
-**Last callback that fires while the loop is still advancing: `Application.wantsToQuit`.**
+Two different questions have two different answers on this path, and the brief conflates
+them by equating "last callback while the loop is advancing" with "the latch's
+installation point". They are kept apart here:
 
-Read that with the qualification in "How far the classification can be trusted"
-below. `wantsToQuit` and `quitting` fire in the *same frame* in both runs, so the
-frame counter cannot separate them; what it does establish is that a whole frame
-elapsed between `ExitingPlayMode` and `wantsToQuit`, so the loop was demonstrably
-still turning when `ExitingPlayMode` fired. `ExitingPlayMode` is therefore the
-latest point on this path with *positive* evidence of a live loop after it.
+- **By the brief's frame-boundary metric, the last callback that fires while the loop is
+  still advancing is `Application.wantsToQuit`.** That is what the label says, and it is
+  reported honestly. It is *not* a recommendation.
+- **The recommended latch installation point is `Application.quitting`.**
+
+The criterion for the recommendation is: the latest callback on this path that (i) is
+measured to fire unconditionally, (ii) cannot be cancelled by another subscriber, and
+(iii) is not disqualified by a known artefact of the metric.
+
+`Application.wantsToQuit` wins the metric but fails (ii). It is a `Func<bool>` veto hook —
+a subscriber returning `false` aborts the quit. A latch armed there would close on a
+shutdown that may never happen, and any handler ordered ahead of it can cancel the very
+event the latch is reacting to. Winning a frame-counter comparison does not make a
+cancellable veto hook an installation point.
+
+`Application.quitting` loses the metric only to an artefact. It fires in the *same frame*
+as `wantsToQuit` in both runs (5016/5016, then 662/662), so the counter cannot separate
+the two at all; its `loop-STALLED` label is produced by the same-frame collision described
+in "How far the classification can be trusted" below, not by any measured loss of the
+loop. It fires unconditionally once the quit is committed, which is what a latch needs.
+
+`playModeStateChanged:ExitingPlayMode` is the latest point on this path with *positive*
+evidence of a live loop after it — a whole frame elapsed between it and `wantsToQuit`.
+It is sound corroboration and a usable earlier warning, but it is editor-only
+(`EditorApplication` does not exist in a player), so it cannot be the primary signal for
+code that must also run outside the editor.
 
 `EnteredEditMode` is listed because the probe's subscription outlives play mode
 (see "Subscription lifetime"), not because it is part of the shutdown sequence.
@@ -103,8 +125,14 @@ measured, not assumed:
 1. **`Application.quitting` never fires.** Neither does `Application.wantsToQuit`,
    nor `playModeStateChanged:ExitingPlayMode`. Anything hung on those three is
    simply never told that the domain is about to be destroyed under it.
-2. **Play mode continues afterwards.** `editor_status` reported
-   `"playMode":"playing"` after the reload completed, in both runs.
+2. **Play mode continues afterwards.** `editor_status`, polled after
+   `recompile_status` reported `completed`, verbatim for run B1:
+
+   ```
+   {"status":"playing","compiling":false,"domainReloadInProgress":false,"playMode":"playing","lastHeartbeat":"2026-08-02T17:51:42.1927513Z","projectPath":"E:\\code\\_Codex\\unity-project\\EchoUnity","unityVersion":"6000.2.7f2"}
+   ```
+
+   Run B2 returned the same blob with `"lastHeartbeat":"2026-08-02T17:54:26.6859437Z"`.
 3. **The probe does not come back.** No second `installed` line ever appeared.
    With "Recompile And Continue Playing" the domain is reloaded without a scene
    reload, so `[RuntimeInitializeOnLoadMethod]` does not re-run. Every static field
@@ -133,10 +161,18 @@ what Task 9 of this iteration exists to do. Build support is not the obstacle:
 
 **Consequence for downstream tasks.** Any task that needs player-quit behaviour must
 either re-run this probe once a bootstrap scene exists, or state plainly that it is
-relying on unmeasured behaviour. Path A's answer must not be copied here. In the
-editor, `Application.quitting` is raised by `Internal_ApplicationQuit` on leaving
-play mode; whether a real player raises it at the same point relative to the last
-loop tick has not been checked in this project.
+relying on unmeasured behaviour. Path A's answer must not be copied here. In the editor,
+`Application.quitting` is raised by `Internal_ApplicationQuit` on leaving play mode — the
+stack frame directly above the probe's handler at `Editor.log` lines 3190 and 3680, i.e.
+in both Path A runs:
+
+```
+Echo.Diagnostics.ShutdownProbe/<>c:<Install>b__1_0 () (at Assets/Scripts/Diagnostics/ShutdownProbe.cs:23)
+UnityEngine.Application:Internal_ApplicationQuit ()
+```
+
+Whether a real player raises it at the same point relative to the last loop tick has not
+been checked in this project.
 
 ---
 
@@ -206,14 +242,26 @@ Use the log file, not the captured buffer, for anything that spans a reload.
 
 ## Summary for Tasks 7 and 9
 
-| Path | Measured | Last callback with the loop demonstrably advancing |
-| --- | --- | --- |
-| A — exit play mode in the editor | yes | `Application.wantsToQuit` (same frame as `Application.quitting`; `playModeStateChanged:ExitingPlayMode` is the last point with a frame boundary *after* it) |
-| B — domain reload during play mode | yes | `AssemblyReloadEvents.beforeAssemblyReload`, which is also the only callback on this path |
-| C — built Windows player | **no** | not measured; the project has no scene to build |
+The last two columns answer different questions and must not be collapsed. The recommended
+install point is the latest callback on the path that fires unconditionally, cannot be
+cancelled by another subscriber, and is not disqualified by an artefact of the metric.
+The metric column is the brief's frame-counter comparison, reported for completeness.
+
+| Path | Measured | **Recommended latch installation point** | Brief's frame-boundary metric winner |
+| --- | --- | --- | --- |
+| A — exit play mode in the editor | yes | **`Application.quitting`** — unconditional, fires once the quit is committed | `Application.wantsToQuit`, which is a cancellable `Func<bool>` veto hook and is **not** the install point; it is listed here only because it wins the metric |
+| B — domain reload during play mode | yes | **`AssemblyReloadEvents.beforeAssemblyReload`** | the same callback — it is the only one that fires on this path |
+| C — built Windows player | **no** | not measured; the project has no scene to build | not measured |
+
+`playModeStateChanged:ExitingPlayMode` is the last point on path A with a frame boundary
+*after* it, and is a sound earlier warning, but it is editor-only and cannot replace
+`Application.quitting`.
 
 A latch that must close on both measured paths has to be armed from **two** signals,
-because the two paths share none: `Application.quitting` (or `ExitingPlayMode`) for
-path A, and `beforeAssemblyReload` for path B. Path B additionally destroys all
-static state without re-running `RuntimeInitializeOnLoadMethod`, so a latch stored
-in a static cannot be assumed to still exist after it.
+because the two paths share none: `Application.quitting` for path A and
+`AssemblyReloadEvents.beforeAssemblyReload` for path B. Do not arm it from
+`Application.wantsToQuit` on either path — a subscriber there can veto the quit outright,
+and the only reason it appears in this document is that it happens to win the brief's
+frame-boundary metric. Path B additionally destroys all static state without re-running
+`RuntimeInitializeOnLoadMethod`, so a latch stored in a static cannot be assumed to still
+exist after it.
