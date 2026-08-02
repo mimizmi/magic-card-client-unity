@@ -12,9 +12,14 @@ namespace Echo.Harness.Tests.EditMode
 {
     public sealed class ProtocolSessionDispatchTests
     {
-        private static ProtocolSession StartedSession(FakeTransport transport)
+        private static ProtocolSession StartedSession(
+            out FakeTransport transport,
+            out RecordingSessionScheduler scheduler)
         {
-            var session = new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            transport = new FakeTransport();
+            scheduler = new RecordingSessionScheduler();
+            var session = new ProtocolSession(
+                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
             session.StartAsync(default).GetAwaiter().GetResult();
             return session;
         }
@@ -22,8 +27,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Subscribe_DeliversTheTypedPayload()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             GameOverEventDto received = null;
             session.Subscribe<GameOverEventDto>(MessageId.GameOverEvent, dto => received = dto);
 
@@ -40,8 +44,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Subscribe_RejectsATypeThatDoesNotMatchTheContract()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out _, out _);
 
             // Caught at subscription time on purpose. Deferring it to dispatch
             // would surface the mistake when the message first arrives, which for
@@ -65,8 +68,7 @@ namespace Echo.Harness.Tests.EditMode
         [TestCase(MessageId.RokkaActivateRequest)]
         public void Subscribe_RejectsAMessageThatCarriesNoPayload(MessageId messageId)
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out _, out _);
 
             var exception = Assert.Throws<ArgumentException>(
                 () => session.Subscribe<GameOverEventDto>(messageId, _ => { }));
@@ -80,8 +82,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Subscribe_StopsDeliveringAfterDisposal()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var count = 0;
             var subscription = session.Subscribe<GameOverEventDto>(
                 MessageId.GameOverEvent, _ => count++);
@@ -96,8 +97,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Dispatch_IsolatesASubscriberThatThrows()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             var secondSubscriberRan = false;
@@ -115,17 +115,39 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(session.State, Is.EqualTo(SessionState.Connected));
         }
 
+        /// <summary>
+        /// Was Dispatch_TreatsAMessageWithNoSubscribersAsNormal, and its assertion
+        /// was that no fault was published at all. That is no longer the contract:
+        /// an undeliverable message now publishes NoDestination, because dropping
+        /// it silently is exactly how a missed MatchFoundEvent used to vanish. The
+        /// half of the old intent that survives is pinned here instead - having
+        /// nowhere to go is not a stream failure, and the pump reads on - and the
+        /// fault list is still counted exactly, so a second unrelated fault would
+        /// still fail this.
+        /// </summary>
         [Test]
-        public void Dispatch_TreatsAMessageWithNoSubscribersAsNormal()
+        public void Dispatch_ReportsAMessageWithNoSubscribersWithoutFaultingThePump()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
 
             transport.EnqueueInbound(Frame(MessageId.TurnTimerEvent, "{}"));
 
-            Assert.That(faults, Is.Empty);
+            Assert.That(faults, Has.Count.EqualTo(1));
+            Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.NoDestination));
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+
+            // State alone cannot tell a live pump from one that died inside
+            // Dispatch, for the reason spelled out in
+            // Heartbeat_SurvivesASendFailureWithoutKillingThePump. Only a later
+            // message actually arriving can.
+            var delivered = false;
+            session.Subscribe<TurnTimerEventDto>(MessageId.TurnTimerEvent, _ => delivered = true);
+            transport.EnqueueInbound(Frame(MessageId.TurnTimerEvent, "{}"));
+
+            Assert.That(delivered, Is.True,
+                "Reporting an undeliverable message must not cost the pump.");
         }
 
         /// <summary>
@@ -139,8 +161,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Dispatch_LetsASubscriberStopTheSessionWithoutFaultingThePump()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.Subscribe<GameOverEventDto>(
@@ -158,8 +179,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void SendAsync_WritesTheEncodedFrameToTheTransport()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
 
             session.SendAsync(
                 MessageId.LoginRequest,
@@ -176,8 +196,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void SendAsync_RejectsAPayloadThatDoesNotMatchTheMessageId()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out _, out _);
 
             Assert.Throws<ArgumentException>(
                 () => session.SendAsync(
@@ -195,8 +214,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void SendAsync_RejectsANullPayloadForAMessageThatRequiresOne()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
 
             var exception = Assert.Throws<ArgumentException>(
                 () => session.SendAsync(
@@ -209,8 +227,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void SendAsync_RejectsAPayloadForAMessageThatCarriesNone()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
 
             var exception = Assert.Throws<ArgumentException>(
                 () => session.SendAsync(
@@ -225,8 +242,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void SendAsync_AcceptsANullPayloadForAMessageThatCarriesNone()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
 
             session.SendAsync(MessageId.Pong, null, default).GetAwaiter().GetResult();
 
@@ -238,7 +254,9 @@ namespace Echo.Harness.Tests.EditMode
         {
             var transport = new FakeTransport();
             using var session = new ProtocolSession(
-                transport, new ManualClock(DateTimeOffset.UnixEpoch));
+                transport,
+                new ManualClock(DateTimeOffset.UnixEpoch),
+                new RecordingSessionScheduler());
 
             Assert.Throws<InvalidOperationException>(
                 () => session.SendAsync(MessageId.Pong, null, default).GetAwaiter().GetResult());
@@ -247,8 +265,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Heartbeat_AnswersAnInboundPingWithPong()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
 
             transport.EnqueueInbound(Bodyless(MessageId.Ping));
 
@@ -261,8 +278,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Heartbeat_DoesNotSurfaceToFaultHandlers()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
 
@@ -277,8 +293,7 @@ namespace Echo.Harness.Tests.EditMode
             // Both of the previous two tests pass even with a bare
             // SendAsync(...).Forget(), because FakeTransport's send succeeds
             // synchronously. This is the test that actually covers the hazard.
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport);
+            using var session = StartedSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             transport.FailNextSend(new IOException("socket closed"));

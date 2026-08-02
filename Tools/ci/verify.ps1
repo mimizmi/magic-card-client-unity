@@ -52,6 +52,12 @@ try {
 & (Join-Path $PSScriptRoot 'verify-architecture.ps1') `
     -ProjectRoot $ProjectRoot `
     -GoServerRoot $GoServerRoot
+# Said before the run rather than after it, so half a minute of silence is not
+# mistaken for a hang. The heartbeat test alone waits out one of the server's 15
+# second ping intervals, and there is no way to make it faster - the interval is a
+# compile-time constant on the server.
+Write-Host ("Unity tests include an end-to-end tier against the remote Go server " +
+    "(~30s); it skips itself unless ECHO_SERVER_HOST is set.") -ForegroundColor DarkGray
 & (Join-Path $PSScriptRoot 'run-unity-tests.ps1') `
     -ProjectRoot $ProjectRoot `
     -UnityEditorPath $UnityEditorPath

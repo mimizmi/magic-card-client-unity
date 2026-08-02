@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
@@ -11,14 +12,20 @@ namespace Echo.Harness.Tests.EditMode
 {
     public sealed class ProtocolSessionLifecycleTests
     {
-        private static ProtocolSession NewSession(FakeTransport transport) =>
-            new ProtocolSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+        private static ProtocolSession CreateSession(
+            out FakeTransport transport,
+            out RecordingSessionScheduler scheduler)
+        {
+            transport = new FakeTransport();
+            scheduler = new RecordingSessionScheduler();
+            return new ProtocolSession(
+                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
+        }
 
         [Test]
         public void StartAsync_ConnectsTheTransportAndReportsConnected()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
 
             session.StartAsync(default).GetAwaiter().GetResult();
 
@@ -29,8 +36,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StartAsync_RejectsASecondStart()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out _, out _);
             session.StartAsync(default).GetAwaiter().GetResult();
 
             Assert.Throws<InvalidOperationException>(
@@ -40,8 +46,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StopAsync_FromDisconnectedIsANoOp()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out _, out _);
 
             Assert.DoesNotThrow(() => session.StopAsync(default).GetAwaiter().GetResult());
             Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
@@ -50,8 +55,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesAFaultForAnUnknownMessageId()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -70,16 +74,24 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesNoFaultForAWellFormedFrame()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
+
+            // The subscription is part of the scenario, not scaffolding. A frame
+            // that decodes cleanly and then has nowhere to go publishes
+            // NoDestination, which is a real failure - the caller subscribed too
+            // late - rather than a counterexample to the claim below. Giving the
+            // message a destination is what keeps this test about decoding.
+            LoginResponseDto delivered = null;
+            session.Subscribe<LoginResponseDto>(MessageId.LoginResponse, dto => delivered = dto);
 
             transport.EnqueueInbound(Frame(
                 MessageId.LoginResponse,
                 "{\"success\":true,\"player_id\":\"p-1\",\"reconnect_token\":\"t-1\"}"));
 
+            Assert.That(delivered, Is.Not.Null);
             Assert.That(faults, Is.Empty,
                 "A fault means something failed; a message that decodes cleanly is not a failure.");
             Assert.That(session.State, Is.EqualTo(SessionState.Connected));
@@ -88,8 +100,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StopAsync_FromConnectedDisconnectsAndStopsThePump()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -107,8 +118,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Dispose_RejectsFurtherUseAndSilencesFaultSubscriptions()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -128,8 +138,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_PublishesAFaultForAMalformedPayloadAndKeepsRunning()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -145,8 +154,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void Pump_TreatsAReceiveFailureAsStreamDesynchronization()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -162,8 +170,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void FaultSubscription_StopsDeliveringAfterDisposal()
         {
-            var transport = new FakeTransport();
-            using var session = NewSession(transport);
+            using var session = CreateSession(out var transport, out _);
             var faults = new List<SessionFault>();
             var subscription = session.SubscribeToFaults(faults.Add);
             session.StartAsync(default).GetAwaiter().GetResult();
@@ -172,6 +179,124 @@ namespace Echo.Harness.Tests.EditMode
             transport.EnqueueInbound(Frame((MessageId)9999, "{}"));
 
             Assert.That(faults, Is.Empty);
+        }
+
+        [Test]
+        public void StopAsyncFailsWaitersEvenWhenDisconnectThrows()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None);
+
+            transport.FailNextDisconnect(new IOException("socket already gone"));
+
+            Assert.Throws<IOException>(
+                () => session.StopAsync(CancellationToken.None).GetAwaiter().GetResult());
+
+            var failure = Assert.Throws<InvalidOperationException>(
+                () => pending.GetAwaiter().GetResult());
+            Assert.That(failure.Message, Does.Contain("stopped before the response"));
+        }
+
+        [Test]
+        public void StopAsyncFailsWaitersWhenHandedAnAlreadyCancelledToken()
+        {
+            var session = CreateSession(out _, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            var pending = session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = "redacted" },
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None);
+
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+
+            Assert.Throws<OperationCanceledException>(
+                () => session.StopAsync(cancelled.Token).GetAwaiter().GetResult());
+            // The message check is load-bearing, not decoration. A stranded waiter
+            // leaves this UniTask incomplete, and GetResult on an incomplete
+            // UniTask throws InvalidOperationException("Not yet completed, UniTask
+            // only allow to use await.") - so the bare Assert.Throws form is
+            // satisfied by the very symptom of the bug and passes against the
+            // unfixed StopAsync. Only the message distinguishes a waiter that was
+            // failed on purpose from one that was abandoned.
+            var failure = Assert.Throws<InvalidOperationException>(
+                () => pending.GetAwaiter().GetResult());
+            Assert.That(failure.Message, Does.Contain("stopped before the response"));
+        }
+
+        [Test]
+        public void DisposeRequestsATransportDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            session.Dispose();
+
+            Assert.That(transport.DisconnectCount, Is.EqualTo(1),
+                "An undisconnected socket leaves the server holding a ghost session " +
+                "until its 35 second pong timeout.");
+        }
+
+        [Test]
+        public void DisposeSurvivesAThrowingDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+            transport.FailNextDisconnect(new IOException("socket already gone"));
+
+            Assert.DoesNotThrow(() => session.Dispose());
+        }
+
+        [Test]
+        public void DisposeOnANeverStartedSessionDoesNotTouchTheTransport()
+        {
+            var session = CreateSession(out var transport, out _);
+
+            session.Dispose();
+
+            Assert.That(transport.DisconnectCount, Is.EqualTo(0),
+                "There is nothing to close, and calling DisconnectAsync on an " +
+                "unconnected transport is not universally safe.");
+        }
+
+        [Test]
+        public void StopAsyncFromFaultedReachesDisconnectedWithoutASecondDisconnect()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            transport.FailNextReceive(new IOException("stream desynchronized"));
+            Assert.That(session.State, Is.EqualTo(SessionState.Faulted));
+            var disconnectsAfterFault = transport.DisconnectCount;
+
+            session.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+            Assert.That(transport.DisconnectCount, Is.EqualTo(disconnectsAfterFault),
+                "The fault path already disconnected, and a second close is not " +
+                "idempotent on every real transport.");
+        }
+
+        [Test]
+        public void AFaultedSessionCanBeStoppedAndStartedAgain()
+        {
+            var session = CreateSession(out var transport, out _);
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+            transport.FailNextReceive(new IOException("stream desynchronized"));
+            session.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.DoesNotThrow(
+                () => session.StartAsync(CancellationToken.None).GetAwaiter().GetResult());
+            Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                "This is the seam reconnect will use next iteration.");
         }
     }
 }

@@ -84,10 +84,58 @@ namespace Echo.Harness.Application
         /// A round-trip probe returns the difference between two reads of this
         /// property, so an implementation whose value can step backwards reports a
         /// negative latency, and one that can step forwards reports a 30 s round trip
-        /// on a healthy link. The only implementation today is monotonic by
-        /// construction, so no test can catch a replacement that is not; the
-        /// requirement is stated here because this is the only place it can be.
+        /// on a healthy link.
+        ///
+        /// <para><b>A live risk, not a theoretical one - and it stopped being
+        /// theoretical without this comment noticing.</b> It used to say the only
+        /// implementation was monotonic by construction, so no test could catch a
+        /// replacement that was not. That was true of ManualClock, whose Advance
+        /// rejects a negative duration. It has been false since SystemClock arrived:
+        /// that one returns DateTimeOffset.UtcNow, which a clock synchronisation or
+        /// a manual change can step in either direction, and both of the paths below
+        /// now run on it.</para>
+        ///
+        /// <para>What a backwards step costs today. SendBudget.TryConsume computes
+        /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches
+        /// a whole interval; a negative elapsed never does, so once the bucket has
+        /// drained the budget wedges at zero and every send is refused until the wall
+        /// clock passes where it had already been. And ProbeRoundTripAsync returns
+        /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
+        /// than zero - so a step landing inside a probe fails that test with a
+        /// negative latency and nothing to say where the number came from.</para>
+        ///
+        /// <para>No test can RELIABLY catch a non-monotonic implementation, because
+        /// the requirement is on the implementation rather than on any call site.
+        /// The end-to-end assertion named above is the whole of what exists, and it
+        /// only fires when a step happens to land inside the probe's own few
+        /// milliseconds - so it is non-deterministic, and when it does fire it
+        /// reports a negative latency rather than a clock that moved. That is why
+        /// the requirement is stated here, and why a new IClock is the wrong place
+        /// to be clever.</para>
         /// </summary>
         DateTimeOffset UtcNow { get; }
+    }
+
+    /// <summary>
+    /// Moves the current continuation onto the session's context. A session's
+    /// receive pump resumes on whatever thread the transport's I/O completed on,
+    /// and its request timeouts resume on a timer thread; both are hopped through
+    /// here so that everything touching session state runs on one context and the
+    /// session itself needs no lock.
+    ///
+    /// The production implementation switches to the Unity main thread. That is
+    /// not on its own why this is a port. Application is compiled with
+    /// noEngineReferences and cannot name a Unity type, but the direct call names
+    /// no Unity type either: UniTask's main-thread awaitable is entirely Cysharp,
+    /// which this assembly already references, and a probe calling it from here
+    /// was measured to compile and to leave the architecture gate green. The port
+    /// exists because a test implementation completes synchronously, which is what
+    /// keeps EditMode tests independent of a player loop that EditMode does not
+    /// run, and because a session should not hard-code which context it confines
+    /// to.
+    /// </summary>
+    public interface ISessionScheduler
+    {
+        UniTask SwitchToSessionContextAsync(CancellationToken cancellationToken);
     }
 }

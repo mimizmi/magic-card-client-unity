@@ -14,6 +14,9 @@ namespace Echo.Harness.TestKit
         private CancellationTokenRegistration pendingReceiveCancellation;
         private Exception nextReceiveFailure;
         private Exception nextSendFailure;
+        private Exception nextDisconnectFailure;
+
+        public int DisconnectCount { get; private set; }
 
         public TransportState State { get; private set; } = TransportState.Disconnected;
 
@@ -56,6 +59,15 @@ namespace Echo.Harness.TestKit
         public void FailNextSend(Exception failure)
         {
             nextSendFailure = failure ?? throw new ArgumentNullException(nameof(failure));
+        }
+
+        /// <summary>
+        /// Makes the next disconnect fail, standing in for a socket that throws on
+        /// close. StopAsync must still fail its waiters when this happens.
+        /// </summary>
+        public void FailNextDisconnect(Exception failure)
+        {
+            nextDisconnectFailure = failure ?? throw new ArgumentNullException(nameof(failure));
         }
 
         public UniTask ConnectAsync(CancellationToken cancellationToken)
@@ -142,11 +154,23 @@ namespace Echo.Harness.TestKit
         public UniTask DisconnectAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            DisconnectCount++;
             State = TransportState.Disconnected;
 
             if (pendingReceive != null)
             {
                 TakePendingReceive().TrySetCanceled(cancellationToken);
+            }
+
+            // Thrown after the state change and after the pending receive is
+            // released, so a failing close still leaves the fake in the state a
+            // real closed socket would be in. A transport that threw before
+            // releasing the receive would hang the pump instead of failing it.
+            if (nextDisconnectFailure != null)
+            {
+                var failure = nextDisconnectFailure;
+                nextDisconnectFailure = null;
+                throw failure;
             }
 
             return UniTask.CompletedTask;
@@ -289,6 +313,21 @@ namespace Echo.Harness.TestKit
             State = LuaRuntimeState.Stopped;
             return UniTask.CompletedTask;
         }
+    }
+
+    /// <summary>
+    /// Wall-clock time, for the few tests that need real elapsed time rather than
+    /// a time they control. It is the only <see cref="IClock"/> that can measure a
+    /// real round trip: a <see cref="ManualClock"/> never advances on its own, so
+    /// a latency measured against one is always zero.
+    ///
+    /// <para>Use it only where the elapsed interval is itself under test.
+    /// Everything else should stay on ManualClock, because a test that depends on
+    /// wall-clock time depends on the machine it runs on.</para>
+    /// </summary>
+    public sealed class SystemClock : IClock
+    {
+        public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
     }
 
     public sealed class ManualClock : IClock

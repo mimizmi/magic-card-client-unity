@@ -14,9 +14,14 @@ namespace Echo.Harness.Tests.EditMode
     {
         private static readonly TimeSpan Generous = TimeSpan.FromSeconds(30);
 
-        private static ProtocolSession StartedSession(FakeTransport transport, ManualClock clock)
+        private static ProtocolSession StartedSession(
+            ManualClock clock,
+            out FakeTransport transport,
+            out RecordingSessionScheduler scheduler)
         {
-            var session = new ProtocolSession(transport, clock);
+            transport = new FakeTransport();
+            scheduler = new RecordingSessionScheduler();
+            var session = new ProtocolSession(transport, clock, scheduler);
             session.StartAsync(default).GetAwaiter().GetResult();
             return session;
         }
@@ -24,8 +29,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_CompletesWithTheTypedResponse()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest,
@@ -44,15 +49,15 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_RejectsASecondConcurrentRequestForTheSameResponse()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var first = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
 
             // The protocol has no correlation id, so two in-flight logins would
             // race for one reply and one caller would get the other's answer.
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<RequestAlreadyInFlightException>(
                 () => session.RequestAsync<LoginResponseDto>(
                     MessageId.LoginRequest, new LoginRequestDto(), Generous, default)
                     .GetAwaiter().GetResult());
@@ -64,8 +69,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_ReleasesTheGateAfterCompleting()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var first = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -82,8 +87,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_DoesNotAlsoDeliverTheResponseToSubscribers()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
             var subscriberRan = false;
             session.Subscribe<LoginResponseDto>(MessageId.LoginResponse, _ => subscriberRan = true);
 
@@ -98,8 +103,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_ReleasesTheGateAfterCancellation()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
             using var cancellation = new CancellationTokenSource();
 
             var cancelled = session.RequestAsync<LoginResponseDto>(
@@ -122,8 +127,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_RejectsAMessageThatHasNoPairedResponse()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var failure = Assert.Throws<ArgumentException>(
                 () => session.RequestAsync<LoginResponseDto>(
@@ -142,8 +147,8 @@ namespace Echo.Harness.Tests.EditMode
             // in ResponseFor. The rejection has to send that caller to
             // Subscribe, not tell it the message is one-way and no answer is
             // coming.
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var failure = Assert.Throws<ArgumentException>(
                 () => session.RequestAsync<GameConfigEventDto>(
@@ -164,8 +169,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_RejectsAResponseTypeThePairingDoesNotProduce()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Without this guard the login goes out, the real LoginResponse is
             // consumed, and the caller dies on the cast - after the server has
@@ -186,8 +191,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_RejectsATimeoutThatCouldNeverExpire()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Timeout.InfiniteTimeSpan installs no timer at all, so the waiter
             // would be genuinely unbounded rather than merely patient.
@@ -220,8 +225,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_PropagatesCallerCancellation()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
             using var cancellation = new CancellationTokenSource();
 
             var pending = session.RequestAsync<LoginResponseDto>(
@@ -244,8 +249,8 @@ namespace Echo.Harness.Tests.EditMode
             // completes inline from EnqueueInbound or Cancel, so the awaiter is
             // already done by the time it is read. This one completes off a timer
             // thread, so the test thread has to actually wait for it.
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
 
             Assert.Throws<TimeoutException>(
                 () => session.RequestAsync<LoginResponseDto>(
@@ -258,8 +263,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_FailsPendingRequestsWhenTheStreamDesynchronizes()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Two waiters on two different response ids, deliberately. With one
             // the loop is indistinguishable from a loop that stops after the
@@ -282,8 +287,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_FailsPendingRequestsWhenTheSessionStops()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -302,8 +307,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void StopAsync_ReachesDisconnectedBeforeItFailsPendingRequests()
         {
-            var transport = new FakeTransport();
-            using var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            using var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
 
             // A failed waiter resumes inline on StopAsync's own stack, so it can
             // re-enter the session. Failing waiters after the state transition
@@ -319,8 +324,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RequestAsync_FailsPendingRequestsWhenTheSessionIsDisposed()
         {
-            var transport = new FakeTransport();
-            var session = StartedSession(transport, new ManualClock(DateTimeOffset.UnixEpoch));
+            var session = StartedSession(
+                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -334,9 +339,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_MeasuresTheIntervalTheClockAdvanced()
         {
-            var transport = new FakeTransport();
             var clock = new ManualClock(DateTimeOffset.UnixEpoch);
-            using var session = StartedSession(transport, clock);
+            using var session = StartedSession(clock, out var transport, out _);
             var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
 
             var pending = session.ProbeRoundTripAsync(default).Preserve();
@@ -352,9 +356,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_SendsTheClockTimestamp()
         {
-            var transport = new FakeTransport();
             var clock = new ManualClock(DateTimeOffset.UnixEpoch);
-            using var session = StartedSession(transport, clock);
+            using var session = StartedSession(clock, out var transport, out _);
             var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
 
             var pending = session.ProbeRoundTripAsync(default).Preserve();
@@ -373,9 +376,8 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_RejectsAMismatchedEcho()
         {
-            var transport = new FakeTransport();
             var clock = new ManualClock(DateTimeOffset.UnixEpoch);
-            using var session = StartedSession(transport, clock);
+            using var session = StartedSession(clock, out var transport, out _);
             var faults = new System.Collections.Generic.List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
 
@@ -384,7 +386,12 @@ namespace Echo.Harness.Tests.EditMode
 
             // A latency number derived from an unrelated reply looks perfectly
             // plausible, which is exactly why it must not be returned.
-            Assert.Throws<InvalidOperationException>(() => pending.GetAwaiter().GetResult());
+            //
+            // The exact type, because NUnit's Assert.Throws<T> demands one:
+            // unlike a catch clause it does not accept a subclass, so this had
+            // to move with the throw rather than riding on the inheritance.
+            Assert.Throws<CorrelationMismatchException>(
+                () => pending.GetAwaiter().GetResult());
             Assert.That(faults, Has.Count.EqualTo(1));
             Assert.That(faults[0].Kind, Is.EqualTo(SessionFaultKind.CorrelationMismatch));
         }
@@ -392,18 +399,16 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_RejectsAnAbandonedProbesEchoAfterARetry()
         {
-            var transport = new FakeTransport();
-
             // Deliberately not the epoch. At ts 0 a stale echo carries the same
             // value as a ts field that was never deserialized at all, so the
             // assertions below would hold for the wrong reason.
             var clock = new ManualClock(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(7));
-            using var session = StartedSession(transport, clock);
+            using var session = StartedSession(clock, out var transport, out _);
             var faults = new System.Collections.Generic.List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
 
             // The first probe is abandoned by cancellation rather than by waiting
-            // out DefaultRequestTimeout, which is ten seconds and is not a
+            // out RoundTripProbeDeadline, which is ten seconds and is not a
             // parameter of ProbeRoundTripAsync. Both routes leave the same state
             // behind - no pending entry for ClientPingResponse, and a reply still
             // owed by the server - and only one of them is deterministic.
@@ -431,7 +436,7 @@ namespace Echo.Harness.Tests.EditMode
             transport.EnqueueInbound(Frame(
                 MessageId.ClientPingResponse, "{\"ts\":" + abandonedTs + "}"));
 
-            var failure = Assert.Throws<InvalidOperationException>(
+            var failure = Assert.Throws<CorrelationMismatchException>(
                 () => retried.GetAwaiter().GetResult());
             Assert.That(failure.Message, Does.Contain(abandonedTs.ToString()));
             Assert.That(failure.Message, Does.Contain(retriedTs.ToString()));

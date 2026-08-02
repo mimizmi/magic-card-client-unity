@@ -27,6 +27,14 @@ namespace Echo.Harness.Application
 
         UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken);
 
+        /// <summary>
+        /// Subscribe before the request that provokes the message. The protocol
+        /// pushes events without waiting: the server's reconnect path sends
+        /// LoginResponse and MatchFoundEvent back to back, so a subscription
+        /// registered after the login returns can miss the event entirely. A
+        /// message with no subscriber publishes a NoDestination fault rather than
+        /// being dropped silently, which is how that mistake becomes visible.
+        /// </summary>
         IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler);
 
         IDisposable SubscribeToFaults(Action<SessionFault> handler);
