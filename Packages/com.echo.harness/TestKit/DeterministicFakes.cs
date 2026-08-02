@@ -316,28 +316,33 @@ namespace Echo.Harness.TestKit
     }
 
     /// <summary>
-    /// Wall-clock time, for the few tests that need real elapsed time rather than
-    /// a time they control. It is the only <see cref="IClock"/> that can measure a
-    /// real round trip: a <see cref="ManualClock"/> never advances on its own, so
-    /// a latency measured against one is always zero.
+    /// Controlled time for tests, implementing both time ports so a test advances
+    /// once and both faces move. Two separate manual objects would make every test
+    /// advance two things, which is noise that hides what the test is about.
     ///
-    /// <para>Use it only where the elapsed interval is itself under test.
-    /// Everything else should stay on ManualClock, because a test that depends on
-    /// wall-clock time depends on the machine it runs on.</para>
+    /// <para>Monotonic by construction: <see cref="Advance"/> rejects a negative
+    /// duration.</para>
     /// </summary>
-    public sealed class SystemClock : IClock
+    public sealed class ManualTime : IClock, IElapsedTime
     {
-        public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
-    }
+        // Ticks since construction. The unit is deliberately TimeSpan ticks, so a
+        // test reasoning about the wall face and the elapsed face gets the same
+        // number from both.
+        private long ticks;
 
-    public sealed class ManualClock : IClock
-    {
-        public ManualClock(DateTimeOffset initialTime)
+        public ManualTime(DateTimeOffset initialTime)
         {
-            UtcNow = initialTime;
+            Origin = initialTime;
         }
 
-        public DateTimeOffset UtcNow { get; private set; }
+        private DateTimeOffset Origin { get; }
+
+        public DateTimeOffset UtcNow => Origin.AddTicks(ticks);
+
+        public long GetTimestamp() => ticks;
+
+        public TimeSpan GetElapsedTime(long startingTimestamp) =>
+            TimeSpan.FromTicks(ticks - startingTimestamp);
 
         public void Advance(TimeSpan duration)
         {
@@ -348,7 +353,7 @@ namespace Echo.Harness.TestKit
                     "Manual time cannot move backwards.");
             }
 
-            UtcNow = UtcNow.Add(duration);
+            ticks += duration.Ticks;
         }
     }
 }

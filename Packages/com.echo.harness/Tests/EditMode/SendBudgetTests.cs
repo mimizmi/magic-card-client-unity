@@ -10,7 +10,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ABudgetOfThirtyAllowsThirtyThenRefuses()
         {
-            var budget = new SendBudget(30, new ManualClock(DateTimeOffset.UnixEpoch));
+            var budget = new SendBudget(30, new ManualTime(DateTimeOffset.UnixEpoch));
 
             for (var i = 0; i < 30; i++)
             {
@@ -24,7 +24,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void TokensRefillOverTime()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
             var budget = new SendBudget(30, clock);
             for (var i = 0; i < 30; i++)
             {
@@ -42,7 +42,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void RefillNeverExceedsTheMaximum()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
             var budget = new SendBudget(30, clock);
             clock.Advance(TimeSpan.FromMinutes(5));
 
@@ -59,7 +59,7 @@ namespace Echo.Harness.Tests.EditMode
         public void ANonPositiveBudgetIsRejected()
         {
             Assert.Throws<ArgumentOutOfRangeException>(
-                () => new SendBudget(0, new ManualClock(DateTimeOffset.UnixEpoch)));
+                () => new SendBudget(0, new ManualTime(DateTimeOffset.UnixEpoch)));
         }
 
         [Test]
@@ -72,12 +72,12 @@ namespace Echo.Harness.Tests.EditMode
             // as a DivideByZeroException on the first send, naming nothing that
             // led to it.
             Assert.DoesNotThrow(() => new SendBudget(
-                (int)TimeSpan.TicksPerSecond, new ManualClock(DateTimeOffset.UnixEpoch)));
+                (int)TimeSpan.TicksPerSecond, new ManualTime(DateTimeOffset.UnixEpoch)));
 
             Assert.Throws<ArgumentOutOfRangeException>(
                 () => new SendBudget(
                     (int)TimeSpan.TicksPerSecond + 1,
-                    new ManualClock(DateTimeOffset.UnixEpoch)));
+                    new ManualTime(DateTimeOffset.UnixEpoch)));
         }
 
         [Test]

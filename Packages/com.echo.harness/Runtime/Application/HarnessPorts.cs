@@ -77,43 +77,38 @@ namespace Echo.Harness.Application
         UniTask ShutdownAsync(CancellationToken cancellationToken);
     }
 
+    /// <summary>
+    /// Wall-clock time, for stamping a moment that leaves the process - a wire
+    /// timestamp the server echoes, a log line, a display.
+    ///
+    /// <para><b>Do not measure an interval with this.</b> Wall time can step in
+    /// either direction under a clock synchronisation or a manual change, so a
+    /// difference between two reads is not a duration. Use
+    /// <see cref="IElapsedTime"/>, which is why this interface no longer carries
+    /// the long warning it used to: the two call sites that measured intervals
+    /// through it - SendBudget's refill and the round-trip probe - have moved, so a
+    /// non-monotonic implementation no longer damages anything.</para>
+    /// </summary>
     public interface IClock
     {
-        /// <summary>
-        /// Must be usable for measuring an interval, not only for stamping a moment.
-        /// A round-trip probe returns the difference between two reads of this
-        /// property, so an implementation whose value can step backwards reports a
-        /// negative latency, and one that can step forwards reports a 30 s round trip
-        /// on a healthy link.
-        ///
-        /// <para><b>A live risk, not a theoretical one - and it stopped being
-        /// theoretical without this comment noticing.</b> It used to say the only
-        /// implementation was monotonic by construction, so no test could catch a
-        /// replacement that was not. That was true of ManualClock, whose Advance
-        /// rejects a negative duration. It has been false since SystemClock arrived:
-        /// that one returns DateTimeOffset.UtcNow, which a clock synchronisation or
-        /// a manual change can step in either direction, and both of the paths below
-        /// now run on it.</para>
-        ///
-        /// <para>What a backwards step costs today. SendBudget.TryConsume computes
-        /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches
-        /// a whole interval; a negative elapsed never does, so once the bucket has
-        /// drained the budget wedges at zero and every send is refused until the wall
-        /// clock passes where it had already been. And ProbeRoundTripAsync returns
-        /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
-        /// than zero - so a step landing inside a probe fails that test with a
-        /// negative latency and nothing to say where the number came from.</para>
-        ///
-        /// <para>No test can RELIABLY catch a non-monotonic implementation, because
-        /// the requirement is on the implementation rather than on any call site.
-        /// The end-to-end assertion named above is the whole of what exists, and it
-        /// only fires when a step happens to land inside the probe's own few
-        /// milliseconds - so it is non-deterministic, and when it does fire it
-        /// reports a negative latency rather than a clock that moved. That is why
-        /// the requirement is stated here, and why a new IClock is the wrong place
-        /// to be clever.</para>
-        /// </summary>
         DateTimeOffset UtcNow { get; }
+    }
+
+    /// <summary>
+    /// Monotonic elapsed time, and only that. It cannot answer "what time is it",
+    /// which is the point: a consumer that only needs a duration should be unable
+    /// to reach a wall clock by accident.
+    ///
+    /// <para><see cref="GetTimestamp"/> returns an opaque counter whose unit is an
+    /// implementation detail; only <see cref="GetElapsedTime"/> may interpret it.
+    /// Implementations must never report a negative interval for a timestamp taken
+    /// earlier.</para>
+    /// </summary>
+    public interface IElapsedTime
+    {
+        long GetTimestamp();
+
+        TimeSpan GetElapsedTime(long startingTimestamp);
     }
 
     /// <summary>

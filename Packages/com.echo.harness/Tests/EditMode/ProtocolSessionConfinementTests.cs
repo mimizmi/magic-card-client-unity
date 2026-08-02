@@ -21,7 +21,7 @@ namespace Echo.Harness.Tests.EditMode
             transport = new FakeTransport();
             scheduler = new RecordingSessionScheduler();
             var session = new ProtocolSession(
-                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
+                transport, new ManualTime(DateTimeOffset.UnixEpoch), scheduler);
             faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();

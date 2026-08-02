@@ -56,7 +56,7 @@ namespace Echo.Harness.Tests.EditMode
 
         private static async UniTask<TcpTransport> ConnectAsync(
             LoopbackProtocolServer server,
-            ManualClock clock,
+            ManualTime clock,
             int budgetPerSecond = 30)
         {
             var transport = new TcpTransport(
@@ -91,7 +91,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch), budgetPerSecond: 100);
+                    server, new ManualTime(DateTimeOffset.UnixEpoch), budgetPerSecond: 100);
 
                 // Several callers plus a heartbeat reply, all in flight together.
                 // This is the shape a real session produces: it answers Ping from
@@ -154,7 +154,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var body = Encoding.UTF8.GetBytes("{\"phase\":\"action\"}");
                 for (var i = 0; i < 30; i++)
@@ -184,7 +184,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var body = Encoding.UTF8.GetBytes("{\"phase\":\"action\"}");
                 for (var i = 0; i < 30; i++)
@@ -226,7 +226,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var tooBig = new byte[WireFrameSpec.MaxPayloadBytes + 1];
 
@@ -403,7 +403,7 @@ namespace Echo.Harness.Tests.EditMode
                     // allowance.
                     SendBudgetPerSecond = SendsBeforeGivingUpOnParking + 8
                 },
-                new ManualClock(DateTimeOffset.UnixEpoch));
+                new ManualTime(DateTimeOffset.UnixEpoch));
             try
             {
                 var connecting = transport.ConnectAsync(CancellationToken.None);

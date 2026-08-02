@@ -15,7 +15,7 @@ namespace Echo.Harness.Tests.EditMode
         private static readonly TimeSpan Generous = TimeSpan.FromSeconds(30);
 
         private static ProtocolSession StartedSession(
-            ManualClock clock,
+            ManualTime clock,
             out FakeTransport transport,
             out RecordingSessionScheduler scheduler)
         {
@@ -30,7 +30,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_CompletesWithTheTypedResponse()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest,
@@ -50,7 +50,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_RejectsASecondConcurrentRequestForTheSameResponse()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var first = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -70,7 +70,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_ReleasesTheGateAfterCompleting()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var first = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -88,7 +88,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_DoesNotAlsoDeliverTheResponseToSubscribers()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
             var subscriberRan = false;
             session.Subscribe<LoginResponseDto>(MessageId.LoginResponse, _ => subscriberRan = true);
 
@@ -104,7 +104,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_ReleasesTheGateAfterCancellation()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
             using var cancellation = new CancellationTokenSource();
 
             var cancelled = session.RequestAsync<LoginResponseDto>(
@@ -128,7 +128,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_RejectsAMessageThatHasNoPairedResponse()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var failure = Assert.Throws<ArgumentException>(
                 () => session.RequestAsync<LoginResponseDto>(
@@ -148,7 +148,7 @@ namespace Echo.Harness.Tests.EditMode
             // Subscribe, not tell it the message is one-way and no answer is
             // coming.
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             var failure = Assert.Throws<ArgumentException>(
                 () => session.RequestAsync<GameConfigEventDto>(
@@ -170,7 +170,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_RejectsAResponseTypeThePairingDoesNotProduce()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Without this guard the login goes out, the real LoginResponse is
             // consumed, and the caller dies on the cast - after the server has
@@ -192,7 +192,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_RejectsATimeoutThatCouldNeverExpire()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Timeout.InfiniteTimeSpan installs no timer at all, so the waiter
             // would be genuinely unbounded rather than merely patient.
@@ -226,7 +226,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_PropagatesCallerCancellation()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out _, out _);
             using var cancellation = new CancellationTokenSource();
 
             var pending = session.RequestAsync<LoginResponseDto>(
@@ -250,7 +250,7 @@ namespace Echo.Harness.Tests.EditMode
             // already done by the time it is read. This one completes off a timer
             // thread, so the test thread has to actually wait for it.
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out _, out _);
 
             Assert.Throws<TimeoutException>(
                 () => session.RequestAsync<LoginResponseDto>(
@@ -264,7 +264,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_FailsPendingRequestsWhenTheStreamDesynchronizes()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out var transport, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out var transport, out _);
 
             // Two waiters on two different response ids, deliberately. With one
             // the loop is indistinguishable from a loop that stops after the
@@ -288,7 +288,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_FailsPendingRequestsWhenTheSessionStops()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out _, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -308,7 +308,7 @@ namespace Echo.Harness.Tests.EditMode
         public void StopAsync_ReachesDisconnectedBeforeItFailsPendingRequests()
         {
             using var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out _, out _);
 
             // A failed waiter resumes inline on StopAsync's own stack, so it can
             // re-enter the session. Failing waiters after the state transition
@@ -325,7 +325,7 @@ namespace Echo.Harness.Tests.EditMode
         public void RequestAsync_FailsPendingRequestsWhenTheSessionIsDisposed()
         {
             var session = StartedSession(
-                new ManualClock(DateTimeOffset.UnixEpoch), out _, out _);
+                new ManualTime(DateTimeOffset.UnixEpoch), out _, out _);
 
             var pending = session.RequestAsync<LoginResponseDto>(
                 MessageId.LoginRequest, new LoginRequestDto(), Generous, default).Preserve();
@@ -339,7 +339,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_MeasuresTheIntervalTheClockAdvanced()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
             using var session = StartedSession(clock, out var transport, out _);
             var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
 
@@ -356,7 +356,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_SendsTheClockTimestamp()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
             using var session = StartedSession(clock, out var transport, out _);
             var sentAt = DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds();
 
@@ -376,7 +376,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ProbeRoundTripAsync_RejectsAMismatchedEcho()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
             using var session = StartedSession(clock, out var transport, out _);
             var faults = new System.Collections.Generic.List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
@@ -402,7 +402,7 @@ namespace Echo.Harness.Tests.EditMode
             // Deliberately not the epoch. At ts 0 a stale echo carries the same
             // value as a ts field that was never deserialized at all, so the
             // assertions below would hold for the wrong reason.
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(7));
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(7));
             using var session = StartedSession(clock, out var transport, out _);
             var faults = new System.Collections.Generic.List<SessionFault>();
             session.SubscribeToFaults(faults.Add);

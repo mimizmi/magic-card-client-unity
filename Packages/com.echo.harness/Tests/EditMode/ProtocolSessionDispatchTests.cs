@@ -19,7 +19,7 @@ namespace Echo.Harness.Tests.EditMode
             transport = new FakeTransport();
             scheduler = new RecordingSessionScheduler();
             var session = new ProtocolSession(
-                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
+                transport, new ManualTime(DateTimeOffset.UnixEpoch), scheduler);
             session.StartAsync(default).GetAwaiter().GetResult();
             return session;
         }
@@ -255,7 +255,7 @@ namespace Echo.Harness.Tests.EditMode
             var transport = new FakeTransport();
             using var session = new ProtocolSession(
                 transport,
-                new ManualClock(DateTimeOffset.UnixEpoch),
+                new ManualTime(DateTimeOffset.UnixEpoch),
                 new RecordingSessionScheduler());
 
             Assert.Throws<InvalidOperationException>(
