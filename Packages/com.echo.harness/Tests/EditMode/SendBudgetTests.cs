@@ -89,6 +89,43 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(granted, Is.EqualTo(13));
         }
 
+        // The same invariant from the side that matters more. The test above polls
+        // slower than the refill interval, so every call refills something and the
+        // carry is only ever a rounding detail. Polling FASTER is the regime a
+        // mark-set-to-now implementation wedges at zero forever: each call measures
+        // less than one interval, refills nothing, and still moves the mark, so the
+        // deficit is discarded on every call and the bucket never refills at all.
+        // Three polls at two fifths of an interval span 1.2 intervals, and they
+        // cross the boundary only because the carry accumulates across them.
+        [Test]
+        public void TryConsume_RefillsWhenPolledFasterThanTheRefillInterval()
+        {
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            var budget = new SendBudget(30, time);
+
+            for (var i = 0; i < 30; i++)
+            {
+                Assert.That(budget.TryConsume(), Is.True, $"token {i} should have been available");
+            }
+
+            Assert.That(budget.TryConsume(), Is.False, "the bucket should be empty");
+
+            var twoFifthsOfAnInterval = TimeSpan.FromTicks(
+                (TimeSpan.TicksPerSecond / 30) * 2 / 5);
+
+            time.Advance(twoFifthsOfAnInterval);
+            Assert.That(budget.TryConsume(), Is.False,
+                "0.4 of an interval has passed and no token is owed yet");
+
+            time.Advance(twoFifthsOfAnInterval);
+            Assert.That(budget.TryConsume(), Is.False,
+                "0.8 of an interval has passed and no token is owed yet");
+
+            time.Advance(twoFifthsOfAnInterval);
+            Assert.That(budget.TryConsume(), Is.True,
+                "1.2 intervals have passed, so the carried remainder must have refilled a token");
+        }
+
         [Test]
         public void ANonPositiveBudgetIsRejected()
         {
