@@ -51,12 +51,14 @@ namespace Echo.Harness.Infrastructure
         //      longs, and is not thread-safe on its own. C# guarantees atomic
         //      reads and writes only up to 32 bits, and `long` is excluded, so
         //      `lastFillTimestamp` and `carryTicks` can tear on a 32-bit runtime
-        //      - the IL2CPP ARM32 target named in clause 2 among them. Replacing
-        //      the DateTimeOffset narrowed that hazard rather than removing it: a
-        //      torn long now corrupts an interval, not a wall-clock moment.
-        //      Either that or a lost update to `tokens` silently raises the
-        //      effective send rate above the server's hard limit, and exceeding it
-        //      closes the connection with no error frame. This gate is the whole
+        //      - a mobile build of the kind clause 2 has in mind. Replacing the
+        //      DateTimeOffset narrowed that hazard rather than removing it: a
+        //      torn long now corrupts an interval, not a wall-clock moment. And
+        //      the lost update to `tokens` needs no tearing at all, so this
+        //      clause stands on every target, 64-bit ones included. Either way
+        //      the effect is the same: an effective send rate silently above the
+        //      server's hard limit, and exceeding it closes the connection with
+        //      no error frame. This gate is the whole
         //      of what makes it safe, and it is what keeps tokens in wire order.
         //
         // Deliberately never disposed. SemaphoreSlim.Dispose does not release
