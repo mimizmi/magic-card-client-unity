@@ -125,3 +125,9 @@ Desktop.ini
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
 /Assets/Resources/Art
 /Assets/Art
+
+# The developer's server endpoint. The address must not enter the repository -
+# see ServerEndpoint for why ECHO_SERVER_HOST has no default. This asset is the
+# local, editable half of the same rule.
+/Assets/Resources/HarnessEndpointSettings.asset
+/Assets/Resources/HarnessEndpointSettings.asset.meta
