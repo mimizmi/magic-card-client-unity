@@ -219,12 +219,26 @@ foreach ($AsmdefFile in $RuntimeAsmdefs) {
 # Echo.Harness.TestKit and the two test assemblies were never opened. That was
 # tolerable while TestKit held nothing but fakes. It is not now: TestKit contains
 # LoopbackProtocolServer, which binds a real TcpListener on loopback and spawns a
-# background reader thread, and RemoteServerEndpoint, which resolves a developer
-# server address out of the environment. The only things keeping either of them
-# out of a player build are two keys in TestKit's own unchecked asmdef -
-# "autoReferenced": false and "defineConstraints": ["UNITY_INCLUDE_TESTS"]. Delete
-# one line from that JSON file and both ship, with this script still printing
-# "Architecture verification passed."
+# background reader thread. The only things keeping it out of a player build are
+# two keys in TestKit's own unchecked asmdef - "autoReferenced": false and
+# "defineConstraints": ["UNITY_INCLUDE_TESTS"]. Delete one line from that JSON
+# file and it ships, with this script still printing "Architecture verification
+# passed." That one type is reason enough for every pin below; none of them rests
+# on there being a second.
+#
+# There used to be a second, and this comment named it: RemoteServerEndpoint,
+# "which resolves a developer server address out of the environment". It no
+# longer does. That resolution moved to
+# Echo.Harness.Infrastructure.ServerEndpoint, so the bootstrap scene and the
+# end-to-end tier cannot disagree about what ECHO_SERVER_HOST means, and
+# RemoteServerEndpoint is now a delegating alias holding no logic. Infrastructure
+# has "defineConstraints": [] and "autoReferenced": true, so the resolver DOES
+# ship in a player build - deliberately, because the application is what needs to
+# find the server. That is safe for the same reason the address rule has always
+# turned on: the type embeds no address, and ECHO_SERVER_HOST has no default, so
+# a player nobody configured resolves nothing rather than reaching somewhere. The
+# thing that must never ship is a committed fallback address, and there is none
+# in the tree to ship.
 #
 # So the three pinned keys are exactly the three that decide reachability:
 #
