@@ -129,5 +129,12 @@ Desktop.ini
 # The developer's server endpoint. The address must not enter the repository -
 # see ServerEndpoint for why ECHO_SERVER_HOST has no default. This asset is the
 # local, editable half of the same rule.
-/Assets/Resources/HarnessEndpointSettings.asset
-/Assets/Resources/HarnessEndpointSettings.asset.meta
+#
+# Unqualified on purpose. Unity merges every folder named Resources under
+# Assets/ and inside packages, and Resources.Load finds the asset in all of
+# them, so an asset at Assets/Game/Resources/ would load correctly. A rule
+# anchored to /Assets/Resources/ would cover only the one location the docs
+# happen to name, and nothing else in this repository scans for addresses -
+# this line is the whole control.
+**/HarnessEndpointSettings.asset
+**/HarnessEndpointSettings.asset.meta
