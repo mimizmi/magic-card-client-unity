@@ -24,6 +24,7 @@ namespace Echo.Harness.Application
 
         private readonly ITransport transport;
         private readonly IClock clock;
+        private readonly IElapsedTime time;
         private readonly ISessionScheduler scheduler;
         private readonly List<Action<SessionFault>> faultHandlers = new List<Action<SessionFault>>();
         private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
@@ -34,10 +35,15 @@ namespace Echo.Harness.Application
         private CancellationTokenSource pumpCancellation;
         private bool disposed;
 
-        public ProtocolSession(ITransport transport, IClock clock, ISessionScheduler scheduler)
+        public ProtocolSession(
+            ITransport transport,
+            IClock clock,
+            IElapsedTime time,
+            ISessionScheduler scheduler)
         {
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
             this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            this.time = time ?? throw new ArgumentNullException(nameof(time));
             this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         }
 
@@ -333,7 +339,13 @@ namespace Echo.Harness.Application
 
         public async UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken)
         {
+            // Two ports, two jobs. The wall clock stamps the ts the server echoes
+            // back, because that value leaves the process and must be a moment. The
+            // returned figure is a duration and comes from the monotonic source, so
+            // a clock synchronisation landing inside the probe can no longer make
+            // this method report a negative latency.
             var sentAt = clock.UtcNow;
+            var startedAt = time.GetTimestamp();
             var request = new ClientPingRequestDto { Ts = sentAt.ToUnixTimeMilliseconds() };
 
             var response = await RequestAsync<ClientPingResponseDto>(
@@ -351,7 +363,7 @@ namespace Echo.Harness.Application
                 throw new CorrelationMismatchException(MessageId.ClientPingResponse, diagnostic);
             }
 
-            return clock.UtcNow - sentAt;
+            return time.GetElapsedTime(startedAt);
         }
 
         public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler)

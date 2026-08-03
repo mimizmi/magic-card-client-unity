@@ -227,8 +227,14 @@ namespace Echo.Harness.Tests.EditMode
                 // RecordingSessionScheduler, because these are EditMode tests with
                 // no player loop to switch to. That is the reason the scheduler port
                 // exists at all, and MainThreadSessionScheduler is PlayMode's.
+                // Two implementations, not one object passed twice: the wall clock
+                // stamps the ping's wire ts and the stopwatch measures the round
+                // trip, and a wall clock cannot serve as an elapsed-time source.
                 session = new ProtocolSession(
-                    transport, new SystemClock(), new RecordingSessionScheduler());
+                    transport,
+                    new SystemClock(),
+                    new StopwatchElapsedTime(),
+                    new RecordingSessionScheduler());
                 await session.StartAsync(CancellationToken.None);
             }
             catch (Exception)

@@ -20,8 +20,8 @@ namespace Echo.Harness.Tests.EditMode
         {
             transport = new FakeTransport();
             scheduler = new RecordingSessionScheduler();
-            var session = new ProtocolSession(
-                transport, new ManualTime(DateTimeOffset.UnixEpoch), scheduler);
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            var session = new ProtocolSession(transport, time, time, scheduler);
             faults = new List<SessionFault>();
             session.SubscribeToFaults(faults.Add);
             session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();

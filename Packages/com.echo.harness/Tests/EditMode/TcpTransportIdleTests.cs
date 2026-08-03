@@ -22,7 +22,7 @@ namespace Echo.Harness.Tests.EditMode
     /// and stops the very loop that would let the operation finish.
     ///
     /// The timeouts here are real wall-clock milliseconds rather than a ManualTime
-    /// tick, because the idle deadline is not driven by the injected IClock and
+    /// tick, because the idle deadline is not driven by the injected IElapsedTime and
     /// cannot be: see the comment on the deadline in TcpTransport.ReceiveAsync.
     /// </summary>
     public sealed class TcpTransportIdleTests

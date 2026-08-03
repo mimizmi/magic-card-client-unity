@@ -15,13 +15,13 @@ namespace Echo.Harness.Tests.EditMode
         private static readonly TimeSpan Generous = TimeSpan.FromSeconds(30);
 
         private static ProtocolSession StartedSession(
-            ManualTime clock,
+            ManualTime time,
             out FakeTransport transport,
             out RecordingSessionScheduler scheduler)
         {
             transport = new FakeTransport();
             scheduler = new RecordingSessionScheduler();
-            var session = new ProtocolSession(transport, clock, scheduler);
+            var session = new ProtocolSession(transport, time, time, scheduler);
             session.StartAsync(default).GetAwaiter().GetResult();
             return session;
         }
@@ -351,6 +351,34 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(
                 pending.GetAwaiter().GetResult(),
                 Is.EqualTo(TimeSpan.FromMilliseconds(120)));
+        }
+
+        // The probe's two time reads have different jobs and must come from
+        // different ports: the wire ts is a moment the server echoes back, and the
+        // returned figure is a duration. ManualTime advances both faces together,
+        // so what this pins is that the duration is computed from the elapsed face
+        // - a probe returning `clock.UtcNow - sentAt` would also produce 75 ms
+        // here, so this test is a shape guard rather than a discriminator, and the
+        // structural win is that IElapsedTime cannot step backwards.
+        [Test]
+        public void ProbeRoundTrip_ReportsTheIntervalBetweenSendAndReply()
+        {
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            var transport = new FakeTransport();
+            var scheduler = new RecordingSessionScheduler();
+            using var session = new ProtocolSession(transport, time, time, scheduler);
+
+            session.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            var probe = session.ProbeRoundTripAsync(CancellationToken.None);
+
+            time.Advance(TimeSpan.FromMilliseconds(75));
+
+            transport.EnqueueInbound(Frame(MessageId.ClientPingResponse, "{\"ts\":0}"));
+
+            var elapsed = probe.GetAwaiter().GetResult();
+
+            Assert.That(elapsed, Is.EqualTo(TimeSpan.FromMilliseconds(75)));
         }
 
         [Test]

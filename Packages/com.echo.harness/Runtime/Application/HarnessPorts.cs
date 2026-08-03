@@ -86,23 +86,29 @@ namespace Echo.Harness.Application
     /// difference between two reads is not a duration. <see cref="IElapsedTime"/>
     /// is the port for that.</para>
     ///
-    /// <para>Two call sites still do it anyway, today: SendBudget's refill and the
-    /// round-trip probe. They move to <see cref="IElapsedTime"/> in the two tasks
-    /// that follow this one, and until they do, a backwards step costs something
-    /// concrete. SendBudget.TryConsume computes
-    /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches a
-    /// whole interval; a negative elapsed never does, so once the bucket has
-    /// drained the budget wedges at zero and every send is refused until the wall
-    /// clock passes where it had already been. ProbeRoundTripAsync returns
-    /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
-    /// than zero, so a step landing inside a probe fails that test with a negative
-    /// latency and nothing to say where the number came from.</para>
+    /// <para>Nothing here does any more, and the two sites that used to are worth
+    /// keeping on the page, because what each of them would have cost is the
+    /// argument against ever routing a duration back through this port.
+    /// SendBudget.TryConsume refills only once the measured interval reaches a
+    /// whole refill interval, and a negative interval never reaches one: on a
+    /// backwards step the drained bucket would wedge at zero and refuse every
+    /// send until the wall clock passed where it had already been. The round-trip
+    /// probe returned <c>clock.UtcNow - sentAt</c>, and the end-to-end tier
+    /// asserts that latency is greater than zero, so a step landing inside a probe
+    /// would fail that assertion with a negative number and nothing to say where
+    /// it came from. Both now measure with <see cref="IElapsedTime"/>, which
+    /// cannot produce either failure. The one consumer left is that same probe,
+    /// and it reads this port for one thing only: stamping the ts the server
+    /// echoes back.</para>
     ///
-    /// <para>Splitting the port moved that risk closer rather than further away,
-    /// which is worth knowing while it lasts. The only wall clock used to be the
-    /// one in TestKit, gated behind UNITY_INCLUDE_TESTS and unable to ship; there
-    /// is now a DateTimeOffset.UtcNow-backed implementation in player-shippable
-    /// Infrastructure, and both consumers named above still difference it.</para>
+    /// <para>Splitting the port is also what put a wall clock within reach of a
+    /// player build, which is why the rule above is a rule rather than a note.
+    /// Before the split every wall clock lived in TestKit, behind
+    /// defineConstraints <c>["UNITY_INCLUDE_TESTS"]</c>, and could not ship; a
+    /// DateTimeOffset.UtcNow-backed <c>SystemClock</c> now sits in Infrastructure
+    /// under no define constraint at all. The reach is permanent and the misuse is
+    /// not: what keeps it harmless is that a consumer needing a duration asks
+    /// <see cref="IElapsedTime"/>, which cannot answer what time it is.</para>
     /// </summary>
     public interface IClock
     {
