@@ -1,3 +1,4 @@
+using System;
 using Echo.Harness.Infrastructure;
 using UnityEngine;
 
@@ -30,8 +31,48 @@ namespace Echo.Harness.Bootstrap
         public static EndpointResolution NotConfigured(string source) =>
             new EndpointResolution(false, null, 0, source);
 
-        public static EndpointResolution From(string host, int port, string source) =>
-            new EndpointResolution(true, host, port, source);
+        /// <summary>
+        /// The one door every configured endpoint comes through, and therefore where
+        /// the port range is enforced.
+        ///
+        /// <para>Until now only the environment door checked it.
+        /// <see cref="ServerEndpoint.TryResolveFromEnvironment"/> rejects anything
+        /// outside <see cref="ServerEndpoint.MinPort"/>..<see cref="ServerEndpoint.MaxPort"/>,
+        /// while the asset's <c>port</c> is a plain serialized <c>int</c> that
+        /// reached here unexamined. <c>0</c> is the value that makes the asymmetry
+        /// matter: it is <c>default(int)</c>, so a freshly created asset or a reset
+        /// Inspector field lands on it, and it clears every .NET argument check on
+        /// the way to a connect that fails at the socket layer - an unreachable
+        /// server to read, a typo in fact.</para>
+        ///
+        /// <para>Here rather than in <see cref="HarnessEndpointSettings.Resolve"/>
+        /// for two reasons. This is the only site that knows
+        /// <paramref name="source"/>, so the message can name the asset or the
+        /// variable the bad value came from rather than reporting a bare integer.
+        /// And it is the only site every configured endpoint must pass - including
+        /// one handed straight to <c>HarnessComposition.Configure(builder,
+        /// endpoint)</c>, which <c>Resolve</c> never sees.</para>
+        ///
+        /// <para>The range itself is <see cref="ServerEndpoint"/>'s rather than a
+        /// second copy; that type's summary is explicit that two copies of the port
+        /// guard would drift. <see cref="NotConfigured"/> is exempt and stays so: it
+        /// carries port <c>0</c> precisely because it carries no endpoint.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException">
+        /// <paramref name="port"/> is not a usable port.
+        /// </exception>
+        public static EndpointResolution From(string host, int port, string source)
+        {
+            if (!ServerEndpoint.IsUsablePort(port))
+            {
+                throw new ArgumentException(
+                    $"{source} supplies port {port}, which is not between " +
+                    $"{ServerEndpoint.MinPort} and {ServerEndpoint.MaxPort}.",
+                    nameof(port));
+            }
+
+            return new EndpointResolution(true, host, port, source);
+        }
     }
 
     /// <summary>

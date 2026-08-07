@@ -68,6 +68,31 @@ namespace Echo.Harness.Tests.EditMode
             }
         }
 
+        // The asymmetry Task 6 shipped and this task closes. ECHO_SERVER_PORT has
+        // rejected these three since Task 6 - ServerEndpointTests carries the same
+        // set as strings - while the asset's port was a serialized int that reached
+        // the transport unexamined. 0 is why it matters rather than being tidy: it
+        // is default(int), so it is what a freshly created asset or a reset
+        // Inspector field holds, and Socket reads it as "let the OS choose" instead
+        // of refusing it, so the failure surfaces as an unreachable server.
+        [TestCase(0)]
+        [TestCase(-1)]
+        [TestCase(70000)]
+        public void Resolve_RejectsAnAssetPortOutsideTheUsableRange(int port)
+        {
+            var asset = ScriptableObject.CreateInstance<HarnessEndpointSettings>();
+            try
+            {
+                asset.SetForTests("from-asset.invalid", port);
+
+                Assert.Throws<ArgumentException>(() => HarnessEndpointSettings.Resolve(asset));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(asset);
+            }
+        }
+
         [Test]
         public void Resolve_PrefersTheAssetOverTheEnvironment()
         {

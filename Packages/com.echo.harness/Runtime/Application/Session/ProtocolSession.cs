@@ -318,10 +318,34 @@ namespace Echo.Harness.Application
         /// Dispose nor CancelPump can free it. On the caller-cancel path that
         /// exposure is NEW: before this hop existed, a cancelled caller returned
         /// promptly and took no hop at all. The timeout path already had it, so
-        /// CancellationToken.None makes nothing there worse. It is narrow today only
-        /// because nothing in production constructs MainThreadSessionScheduler - see
-        /// the open item in docs/migration-checklist.md - and it stops being narrow
-        /// on the day something does.</para>
+        /// CancellationToken.None makes nothing there worse.</para>
+        ///
+        /// <para><b>What bounds it, corrected.</b> This paragraph used to end "narrow
+        /// today only because nothing in production constructs
+        /// MainThreadSessionScheduler ... and it stops being narrow on the day
+        /// something does". That day has come and the reason was wrong twice over.
+        /// HarnessComposition.Configure now registers MainThreadSessionScheduler as
+        /// ISessionScheduler, so any container built from the composition root
+        /// constructs one. And the stall had already been narrowed by something this
+        /// paragraph never mentioned: the scheduler's shutdown latch post-dates it.
+        /// Once IsLatched, SwitchToSessionContextAsync refuses before an awaiter is
+        /// ever constructed, so the hop comes back cancelled instead of parking on a
+        /// dead loop, and the swallow above handles it. The stall survives only where
+        /// the player loop stops without any of the three signals reaching the
+        /// scheduler.</para>
+        ///
+        /// <para>What still bounds it beyond that is a schedule fact rather than a
+        /// design one, so do not lean on it: registration is lazy and nothing
+        /// resolves the graph yet. There is no LifetimeScope and no scene in this
+        /// repository, and Configure has no caller outside the EditMode smoke test,
+        /// so no session is started and no request is ever in flight from anything
+        /// the composition root wires. A bootstrap scene that starts the session ends
+        /// that, and it must be paired with a shutdown that reaches StopAsync or
+        /// Dispose - those are what fail the waiters with a truthful,
+        /// non-cancellation exception. Without one, a latched pump leaves through the
+        /// OperationCanceledException catch in RunPumpAsync, nothing answers the
+        /// waiter, and the caller is told its request timed out: a fabricated network
+        /// failure for an orderly quit.</para>
         /// </summary>
         private async UniTask SwitchToSessionContextForTeardownAsync()
         {
@@ -490,6 +514,17 @@ namespace Echo.Harness.Application
                 }
                 catch (OperationCanceledException)
                 {
+                    // Deliberately silent, and there is one caller who must know
+                    // why. Two things reach here: the pump's own token, cancelled
+                    // by StopAsync or Dispose - both of which fail the waiters
+                    // themselves, so there is nothing left to do - and a scheduler
+                    // that refused the hop because the player loop is going away.
+                    // Nothing fails the waiters on that second path. A request in
+                    // flight then waits out its own deadline and is told it timed
+                    // out, which reports a network failure for an orderly quit.
+                    // Whatever drives the lifecycle must reach StopAsync or Dispose
+                    // on shutdown; that, not a wider catch here, is what keeps the
+                    // report honest.
                     return;
                 }
                 catch (Exception exception)

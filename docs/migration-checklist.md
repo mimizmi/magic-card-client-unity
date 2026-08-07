@@ -108,15 +108,23 @@ deliverable.
   volume. It replaced a silent drop, which is strictly better, but every event that
   arrives before its UI subscriber now publishes one; the first Phase 2 view will
   show whether that reads as signal or noise.
-- [ ] Give the session stack a production wiring, and note that this is larger than
-  a DI registration. `HarnessComposition` registers only `HarnessRuntimeDescriptor`,
-  so nothing constructs `MainThreadSessionScheduler` — but the blocker underneath is
-  that **there is no production `IClock` at all**. Both implementations live in
-  `Echo.Harness.TestKit`, which carries `"defineConstraints": ["UNITY_INCLUDE_TESTS"]`,
-  and `TcpTransport` and `ProtocolSession` both require one in their constructors. As
-  it stands the transport, the session, the scheduler and the send budget cannot be
-  constructed in a player build. A shippable clock has to land before, or with, the
-  lifetime scopes.
+- [x] Give the session stack a production wiring. Two claims this item used to carry
+  were already stale by the time Task 8 read it, and they are recorded rather than
+  quietly deleted. It said "there is no production `IClock` at all. Both
+  implementations live in `Echo.Harness.TestKit`" — that stopped being true when
+  `SystemClock` and `StopwatchElapsedTime` landed in
+  `Echo.Harness.Infrastructure/SystemTime.cs`, whose asmdef carries
+  `"defineConstraints": []` and therefore ships in a player. And it said "nothing
+  constructs `MainThreadSessionScheduler`" — `HarnessComposition.Configure` now
+  registers it as `ISessionScheduler` alongside `SystemClock`, `StopwatchElapsedTime`,
+  `TcpTransportOptions`, `TcpTransport` and `ProtocolSession`, the last two as
+  singletons, plus the resolved `EndpointResolution`. What remains is not a
+  registration and keeps its own item below: **registering is not resolving.** Every
+  registration is lazy, and with no `LifetimeScope` and no scene in the repository,
+  `Configure` has no caller outside the EditMode smoke test. Nothing starts a session
+  yet, and nothing stops one — see the shutdown note on
+  `ProtocolSession.SwitchToSessionContextForTeardownAsync` for what a driver owes the
+  session on the way out.
 - [ ] Decide what a caller cancelling one receive should mean. `TcpTransport.ReceiveAsync`
   closes the link on **any** cancellation of its token, not only on the idle deadline —
   the socket close is what unparks a read this runtime cannot otherwise interrupt. A

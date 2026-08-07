@@ -60,6 +60,20 @@ namespace Echo.Harness.Tests.EditMode
                 () => ServerEndpoint.TryResolveFromEnvironment(out _));
         }
 
+        // The environment door has rejected these since Task 6; the constructor
+        // assigned the port unchecked, so the type accepted what its own resolver
+        // refused. 0 is the one that matters: it is default(int), and it clears
+        // every .NET argument check on the way to a connect that fails at the
+        // socket layer and reads as an unreachable server rather than as a typo.
+        [TestCase(0)]
+        [TestCase(-1)]
+        [TestCase(70000)]
+        public void Constructor_RejectsAPortOutsideTheUsableRange(int port)
+        {
+            Assert.Throws<ArgumentException>(
+                () => new ServerEndpoint("example.invalid", port));
+        }
+
         [Test]
         public void RemoteServerEndpoint_ResolvesThroughTheSameImplementation()
         {

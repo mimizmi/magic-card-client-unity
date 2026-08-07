@@ -38,11 +38,52 @@ namespace Echo.Harness.Infrastructure
 
         public const int DefaultPort = 43966;
 
+        /// <summary>
+        /// The usable port range, written down once.
+        ///
+        /// <para><see cref="MinPort"/> is 1 rather than <c>IPEndPoint.MinPort</c>'s 0,
+        /// and that one value is why this range needs stating at all. Zero clears
+        /// every argument check .NET makes: <c>Socket</c> and <c>TcpClient</c> read it
+        /// as "let the OS choose", so a bind succeeds and a connect fails at the
+        /// socket layer with WSAEADDRNOTAVAIL - which reads to a developer as an
+        /// unreachable server rather than as the typo it is. It is also
+        /// <c>default(int)</c>, so it is the value a freshly created asset or a reset
+        /// Inspector field lands on.</para>
+        ///
+        /// <para>Public, with <see cref="IsUsablePort"/>, because a port reaches this
+        /// application through a second door that never touches this type - the
+        /// settings asset - and this class's own summary says why that must not
+        /// become a second copy of the rule: two copies of the port guard would
+        /// drift, and the drift runs against a different endpoint than the one asked
+        /// for while reporting whatever answers as the truth.</para>
+        /// </summary>
+        public const int MinPort = 1;
+
+        /// <inheritdoc cref="MinPort"/>
+        public const int MaxPort = 65535;
+
+        /// <inheritdoc cref="MinPort"/>
+        public static bool IsUsablePort(int port) => port >= MinPort && port <= MaxPort;
+
+        /// <exception cref="ArgumentException">
+        /// The host is blank, or the port is outside
+        /// <see cref="MinPort"/>..<see cref="MaxPort"/>. The port check is here as
+        /// well as at the doors that supply one, because a constructor that took the
+        /// host seriously and assigned the port unchecked was lying about what it
+        /// accepts.
+        /// </exception>
         public ServerEndpoint(string host, int port)
         {
             if (string.IsNullOrWhiteSpace(host))
             {
                 throw new ArgumentException("A host is required.", nameof(host));
+            }
+
+            if (!IsUsablePort(port))
+            {
+                throw new ArgumentException(
+                    $"A port must be between {MinPort} and {MaxPort}; {port} is not.",
+                    nameof(port));
             }
 
             Host = host;
@@ -93,13 +134,16 @@ namespace Echo.Harness.Infrastructure
                     NumberStyles.None,
                     CultureInfo.InvariantCulture,
                     out var port) ||
-                port < 1 ||
-                port > 65535)
+                !IsUsablePort(port))
             {
+                // Kept rather than left to the constructor's guard, which would
+                // catch the same values one frame later. This message names the
+                // variable and how to unset it; the constructor cannot, because by
+                // then the only thing it can see is an int.
                 throw new ArgumentException(
                     $"{PortVariable} is set to '{configured}', which is not a port " +
-                    $"between 1 and 65535. Unset it to use the default of " +
-                    $"{DefaultPort}.");
+                    $"between {MinPort} and {MaxPort}. Unset it to use the default " +
+                    $"of {DefaultPort}.");
             }
 
             return port;
