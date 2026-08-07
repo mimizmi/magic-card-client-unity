@@ -148,5 +148,116 @@ namespace Echo.Harness.Tests.PlayMode
                     "Even the cancelled switch resumes on the main thread, because the " +
                     "player loop is what runs the continuation that throws.");
             });
+
+        // The failure this closes: UniTask.SwitchToMainThread queues its
+        // continuation on the player loop WITHOUT consulting the token, so once the
+        // loop stops a pending hop never resumes and never throws. A session can
+        // handle a hop that fails; it has no answer for one that never returns.
+        [UnityTest]
+        public IEnumerator ALatchedSchedulerCancelsInsteadOfQueueingOntoADeadLoop()
+        {
+            var scheduler = new MainThreadSessionScheduler();
+            scheduler.LatchForShutdown();
+
+            // A live witness rather than an afterthought: LatchForShutdown must set
+            // per-instance state, not the process-wide flag. If it ever set the static
+            // instead, this scheduler would come back latched and
+            // AnUnlatchedSchedulerStillHops below would begin failing whenever it
+            // happened to run second. That is the one ordering dependency the pair
+            // could have, and this pins it shut.
+            var bystander = new MainThreadSessionScheduler();
+
+            Exception caught = null;
+            var completed = false;
+
+            RunAsync().Forget();
+
+            async UniTaskVoid RunAsync()
+            {
+                try
+                {
+                    await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    caught = ex;
+                }
+                finally
+                {
+                    completed = true;
+                }
+            }
+
+            var deadline = Time.realtimeSinceStartup + 5f;
+            while (!completed && Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            // Kept as a liveness guard on the deadline loop above, but do not read it
+            // as the assertion that catches the defect - measured, it cannot be. A
+            // PlayMode test runs on a main thread whose player loop is alive, so an
+            // unlatched hop completes here too and this stays true either way. The
+            // mutation check confirmed it: with the latch's throw commented out, this
+            // line passed and the next one failed with "Expected: instance of
+            // <System.OperationCanceledException> But was: null". The parked-hop
+            // scenario the latch exists for cannot be staged inside a live loop, so
+            // what is pinned here is the refusal, not the parking.
+            Assert.That(completed, Is.True, "the hop must settle within the deadline");
+            Assert.That(
+                caught,
+                Is.InstanceOf<OperationCanceledException>(),
+                "This is the assertion that kills a broken latch. A latched scheduler " +
+                "must refuse the hop outright; without the refusal the hop simply " +
+                "succeeds and nothing is thrown.");
+            Assert.That(
+                scheduler.IsLatched,
+                Is.True,
+                "the scheduler under test must still report itself latched");
+            Assert.That(
+                bystander.IsLatched,
+                Is.False,
+                "LatchForShutdown must latch one scheduler, not the process. A latch " +
+                "that leaked into the static would outlive this test and poison every " +
+                "scheduler built for the rest of the play session.");
+        }
+
+        /// <summary>
+        /// <c>IsLatched</c> ORs a process-wide static, so this assertion is only sound
+        /// if nothing can set that static during a PlayMode run. Three things write it,
+        /// and none of them can fire here: <c>Application.quitting</c> and
+        /// <c>ExitingPlayMode</c> arrive when the run is already over, and
+        /// <c>beforeAssemblyReload</c> would destroy the run rather than perturb it.
+        /// The fourth candidate - the sibling test above - is ruled out by
+        /// construction rather than by ordering, because <c>LatchForShutdown</c> is
+        /// pinned to per-instance state there. Entering play mode also clears the
+        /// static twice over, from the RuntimeInitialize hook and again on
+        /// <c>EnteredPlayMode</c>, so a value carried in from a previous play session
+        /// cannot reach this line either.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator AnUnlatchedSchedulerStillHops()
+        {
+            var scheduler = new MainThreadSessionScheduler();
+
+            Assert.That(scheduler.IsLatched, Is.False);
+
+            var completed = false;
+            RunAsync().Forget();
+
+            async UniTaskVoid RunAsync()
+            {
+                await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
+                completed = true;
+            }
+
+            var deadline = Time.realtimeSinceStartup + 5f;
+            while (!completed && Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            Assert.That(completed, Is.True);
+        }
     }
 }

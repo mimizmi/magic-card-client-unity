@@ -1,6 +1,11 @@
+using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
+using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace Echo.Harness.Infrastructure
 {
@@ -45,11 +50,202 @@ namespace Echo.Harness.Infrastructure
     /// token is only checked once that continuation runs. A cancelled caller
     /// therefore still costs a frame before it learns it was cancelled. Do not read
     /// the token argument as a promise of a prompt return.</para>
+    ///
+    /// <para><b>The latched path is the one exception to that, and it is the whole
+    /// reason the latch exists.</b> Once <see cref="IsLatched"/> is true the hop is
+    /// refused before <c>SwitchToMainThread</c> is ever reached, so the returned
+    /// UniTask is already cancelled when the call returns and the caller learns on its
+    /// first await - on either thread, with no frame in between. Note that this makes
+    /// the latched path prompt in the same sense the already-on-main-thread path is,
+    /// and for the same reason: no awaiter is ever constructed. The failure it closes
+    /// is worse than a slow cancellation. <c>SwitchToMainThread</c> queues its
+    /// continuation onto the player loop <i>without</i> consulting the token, so once
+    /// that loop stops a pending hop neither resumes nor throws. A session can handle
+    /// a hop that fails; it has no answer for one that never returns.</para>
     /// </summary>
     public sealed class MainThreadSessionScheduler : ISessionScheduler
     {
+        // Static because the signal is a property of the process, not of one
+        // scheduler: a scheduler constructed after the loop has begun stopping is
+        // just as unable to hop as one constructed before it.
+        private static volatile bool processIsShuttingDown;
+
+        private volatile bool latched;
+
+        public bool IsLatched => latched || processIsShuttingDown;
+
+        /// <summary>
+        /// Declares that the player loop is going away, after which
+        /// <see cref="SwitchToSessionContextAsync"/> cancels rather than queueing a
+        /// continuation that will never run.
+        ///
+        /// <para><b>One-way, and for this instance only.</b> It sets the per-scheduler
+        /// field and never the process-wide one, so no caller can latch a scheduler it
+        /// does not own.</para>
+        ///
+        /// <para>An earlier draft justified the one-way rule with "there is no path on
+        /// which a loop that has begun stopping starts again within the same process
+        /// lifetime". That is false, and the counterexample is measured rather than
+        /// argued: on path B of
+        /// <c>docs/findings/2026-08-02-unity-shutdown-callback-order.md</c>, a domain
+        /// reload during play mode raises <c>beforeAssemblyReload</c> and play mode
+        /// then <i>continues</i>. The narrower claim that survives is the one the
+        /// design actually rests on: a latch cannot outlive the shutdown it was armed
+        /// for, because the reload that follows destroys this static and every
+        /// scheduler instance along with it. No unlatch is offered, because an unlatch
+        /// would invite a caller to clear the flag during teardown - which is exactly
+        /// when it is right.</para>
+        /// </summary>
+        public void LatchForShutdown() => latched = true;
+
+        private static void OnProcessQuitting() => processIsShuttingDown = true;
+
+        /// <summary>
+        /// Installs the one shutdown signal that also exists outside the editor.
+        ///
+        /// <para>Deliberately <i>not</i> where the editor signals are wired. A domain
+        /// reload during play mode does not re-run
+        /// <c>RuntimeInitializeOnLoadMethod</c> - measured, the finding's path B fact 3
+        /// - so anything installed only from here is silently dead for the remainder of
+        /// that play session. <c>InstallEditorShutdownSignals</c> below does re-run,
+        /// and carries the editor signals for that reason. A built player has no domain
+        /// reloads, so this hook needs no re-arm there; that last clause is reasoning
+        /// from the absence of reloads in a player, not a measurement, since path C was
+        /// never exercised.</para>
+        /// </summary>
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+        private static void InstallRuntimeShutdownSignals()
+        {
+            // Reset first - but the reason given here is narrower than the one this
+            // method was handed. That reason was: "With Enter Play Mode Options and
+            // domain reload disabled, this method re-runs while the static still
+            // carries the previous play session's value." Whether
+            // RuntimeInitializeOnLoadMethod re-runs in that configuration was NOT
+            // established for this project. EditorSettings has
+            // m_EnterPlayModeOptions: 0, so entering play mode always performs a full
+            // domain reload here, and the configuration the claim describes cannot be
+            // observed without changing a project setting.
+            //
+            // What holds either way: with the reload, this line is a no-op on an
+            // already-zeroed static; without one, it is what stops a new session
+            // inheriting the old session's flag. It is cheap and it cannot be wrong, so
+            // it stays - only the justification has been cut back to what is known. The
+            // re-arm that does NOT depend on this open question is the EnteredPlayMode
+            // reset in the editor installer.
+            processIsShuttingDown = false;
+
+            // Fully qualified deliberately. This file is in Echo.Harness.Infrastructure,
+            // whose enclosing namespace Echo.Harness contains a namespace named
+            // Application; enclosing-namespace lookup beats a using directive, so a bare
+            // "Application" here binds to Echo.Harness.Application and does not compile.
+            //
+            // Removed before added, with a method group rather than a lambda so that the
+            // removal can match anything. If this ever re-runs without the statics
+            // having been wiped, that idiom is what keeps one subscription from
+            // silently becoming two.
+            UnityEngine.Application.quitting -= OnProcessQuitting;
+            UnityEngine.Application.quitting += OnProcessQuitting;
+        }
+
+#if UNITY_EDITOR
+        private static void OnBeforeAssemblyReload() => processIsShuttingDown = true;
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            switch (state)
+            {
+                case PlayModeStateChange.EnteredPlayMode:
+                    // A loop that has just started is not a loop that is stopping. This
+                    // is the re-arm that depends on no claim about
+                    // RuntimeInitializeOnLoadMethod: EnteredPlayMode is measured to fire
+                    // on every play-mode entry in the finding (frame=1 in all four
+                    // runs), and measured to arrive after the RuntimeInitialize hook,
+                    // whose "installed" line is frame=0 - so it gets the last word.
+                    processIsShuttingDown = false;
+                    break;
+                case PlayModeStateChange.ExitingPlayMode:
+                    // Load-bearing, not mere corroboration. The finding ranks this
+                    // behind Application.quitting as a "usable earlier warning", and on
+                    // a fresh domain that is all it is - it fires one frame sooner
+                    // (5015 before 5016, 661 before 662). After a domain reload during
+                    // play, though, Application.quitting has no subscriber at all,
+                    // because RuntimeInitializeOnLoadMethod did not re-run. From that
+                    // point on this is the only signal left on path A.
+                    processIsShuttingDown = true;
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Re-arms the editor-side signals after every domain reload.
+        ///
+        /// <para><c>InitializeOnLoadMethod</c> rather than a second
+        /// <c>RuntimeInitializeOnLoadMethod</c>, because a reload during play mode
+        /// destroys every static - the delegate fields above included - and does not
+        /// re-run the runtime hook. Without this, the latch would be dead for the rest
+        /// of any play session in which a script was edited, which is the ordinary case
+        /// while developing.</para>
+        ///
+        /// <para><b>Measured, not assumed.</b> With these three installers temporarily
+        /// logging, a play session was entered, a recompile forced mid-play, and play
+        /// mode then exited. <c>Editor.log</c>, in order: <c>OnBeforeAssemblyReload</c>
+        /// (the latch arming on path B), then <c>InstallEditorShutdownSignals</c> again
+        /// in the fresh domain - <b>no</b> <c>InstallRuntimeShutdownSignals</c> line
+        /// beside it, reproducing the finding's path B fact 3 - and finally, on exiting
+        /// play mode, <c>ExitingPlayMode</c> arming the latch. That last line is the
+        /// whole point: it was delivered by a subscription this method re-made after
+        /// the reload, at a moment when <c>Application.quitting</c> had no subscriber
+        /// at all. The dictated design, which installed every signal from the runtime
+        /// hook alone, would have been silently dead from the recompile onwards.</para>
+        ///
+        /// <para>The finding warns that "any editor-side subscription made from runtime
+        /// code has this tail and should unsubscribe rather than assume play-mode exit
+        /// ended it". That warning is answered by relocating the subscription rather
+        /// than by unsubscribing: outliving play mode is precisely what is wanted of a
+        /// re-arm, and an installer that unsubscribed on play-mode exit would restore
+        /// the hole it exists to close. The tail's real hazard is duplication, and
+        /// <c>-=</c> before <c>+=</c> on a method group closes that instead.</para>
+        ///
+        /// <para><c>Application.quitting</c> is deliberately not re-subscribed here. In
+        /// the editor it is raised by <c>Internal_ApplicationQuit</c> on leaving play
+        /// mode - the same event <c>ExitingPlayMode</c> already reports, one frame
+        /// earlier - so adding it would buy nothing that case does not already
+        /// cover.</para>
+        /// </summary>
+        [InitializeOnLoadMethod]
+        private static void InstallEditorShutdownSignals()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        }
+#endif
+
         public async UniTask SwitchToSessionContextAsync(CancellationToken cancellationToken)
         {
+            // Checked before the hop, not after. After is too late by construction:
+            // the await is the thing that never returns.
+            //
+            // Thrown without a message, and that is not an oversight. This is an
+            // `async UniTask` method that has not yet awaited, so the throw travels via
+            // AsyncUniTaskMethodBuilder.Task into UniTask.FromException, which reads
+            // `if (ex is OperationCanceledException oce) return
+            // FromCanceled(oce.CancellationToken)` and drops the exception object
+            // entirely; the caller's await is then served by CanceledResultSource,
+            // which throws a brand new OperationCanceledException of its own. Any text
+            // put here would reach nobody. (Read out of the vendored UniTask source,
+            // Runtime/UniTask.Factory.cs lines 30-37 and 408-420, rather than observed
+            // at runtime.) So the explanation lives here, where it can be read: the
+            // session context is gone, a continuation queued onto the stopping player
+            // loop would never run, and this is an orderly shutdown signal rather than
+            // a transport failure.
+            if (IsLatched)
+            {
+                throw new OperationCanceledException();
+            }
+
             // SwitchToMainThread returns a SwitchToMainThreadAwaitable rather than
             // a UniTask, hence the async wrapper instead of returning it directly.
             await UniTask.SwitchToMainThread(cancellationToken);
