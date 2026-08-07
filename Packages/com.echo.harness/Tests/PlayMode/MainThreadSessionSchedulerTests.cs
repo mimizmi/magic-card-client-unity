@@ -361,8 +361,19 @@ namespace Echo.Harness.Tests.PlayMode
 #if UNITY_EDITOR
         /// <summary>
         /// Guarded by <c>UNITY_EDITOR</c> because <c>PlayModeStateChange</c> is a
-        /// <c>UnityEditor</c> type and this assembly has <c>includePlatforms: []</c>,
-        /// so it is compiled for players too.
+        /// <c>UnityEditor</c> type, and this assembly does reach one target where that
+        /// type does not exist: a standalone <i>player test build</i>, which defines
+        /// <c>UNITY_INCLUDE_TESTS</c> and has no <c>UnityEditor</c>.
+        ///
+        /// <para>Not, as an earlier draft of this comment claimed, because
+        /// <c>includePlatforms: []</c> leaves it "compiled for players too". It is not:
+        /// this assembly carries <c>defineConstraints: [UNITY_INCLUDE_TESTS]</c>, and
+        /// <c>Tools/ci/verify-architecture.ps1:243-247</c> says in as many words that
+        /// the constraint "compiles the assembly out entirely" and "is not defined in a
+        /// player build" - pinning it for this very assembly at line 294. The empty
+        /// platform list alone would permit a player build; the define constraint is
+        /// what prevents an ordinary one. The guard is right either way, but the reason
+        /// had to be.</para>
         ///
         /// <para>What it pins: nothing reloads the domain when play mode ends in this
         /// project, so the flag armed at <c>ExitingPlayMode</c> would otherwise stay
