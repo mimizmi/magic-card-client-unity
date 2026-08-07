@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
@@ -6,6 +7,16 @@ using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
+
+// Assembly-level, and parked in this file rather than in a new AssemblyInfo.cs because
+// this class is the only thing in Echo.Harness.Infrastructure with internals worth
+// exposing. What it buys is the only seam that reaches the process-wide shutdown
+// signal from a test: the members it opens are the ones production subscribes, so a
+// test invoking them exercises the real arming path rather than a setter invented for
+// the test. Reflection would have needed no production surface at all, but it would
+// also have gone on passing after any of those members was renamed or deleted, which is
+// precisely the failure this seam exists to make impossible.
+[assembly: InternalsVisibleTo("Echo.Harness.Tests.PlayMode")]
 
 namespace Echo.Harness.Infrastructure
 {
@@ -89,16 +100,44 @@ namespace Echo.Harness.Infrastructure
         /// argued: on path B of
         /// <c>docs/findings/2026-08-02-unity-shutdown-callback-order.md</c>, a domain
         /// reload during play mode raises <c>beforeAssemblyReload</c> and play mode
-        /// then <i>continues</i>. The narrower claim that survives is the one the
-        /// design actually rests on: a latch cannot outlive the shutdown it was armed
-        /// for, because the reload that follows destroys this static and every
-        /// scheduler instance along with it. No unlatch is offered, because an unlatch
-        /// would invite a caller to clear the flag during teardown - which is exactly
-        /// when it is right.</para>
+        /// then <i>continues</i>.</para>
+        ///
+        /// <para><b>The replacement was false too, and this is the third attempt.</b>
+        /// It read: "a latch cannot outlive the shutdown it was armed for, because the
+        /// reload that follows destroys this static and every scheduler instance along
+        /// with it". True on path B. False on path A, because <i>no reload follows</i>
+        /// leaving play mode in this project. The finding's "Subscription lifetime
+        /// across repeated play sessions" section measured handlers registered inside a
+        /// play session going on to fire afterwards - they deliver
+        /// <c>EnteredEditMode</c>, then the <i>next</i> entry's <c>ExitingEditMode</c>
+        /// and <c>beforeAssemblyReload</c>. If the handlers survive play-mode exit then
+        /// so does the domain, and so does this static. The reload that eventually
+        /// frees them belongs to the next play-mode <i>entry</i>, not to the exit.</para>
+        ///
+        /// <para>What is true is narrower, and it is two statements rather than one
+        /// because the two flags are bounded by different things. The instance flag
+        /// this method sets is bounded by the instance: nothing else can reach it and
+        /// no scheduler outlives the session that owns it. The static is bounded by an
+        /// explicit clear on each of the two paths that arm it. On path B,
+        /// <c>beforeAssemblyReload</c>'s arming is undone by the reload immediately
+        /// after it, which the finding's path B fact 3 records as returning every
+        /// static field in the reloaded domain to its default. On path A,
+        /// <c>ExitingPlayMode</c>'s arming is undone by the <c>EnteredEditMode</c> case
+        /// in <c>OnPlayModeStateChanged</c> - the finding logs that callback in both
+        /// path A runs, after <c>Application.quitting</c>, so it gets the last word
+        /// there. Neither bound is a property of a reload alone, which is what the
+        /// second draft got wrong.</para>
+        ///
+        /// <para>No unlatch is offered, because an unlatch would invite a caller to
+        /// clear the flag during teardown - which is exactly when it is right.</para>
         /// </summary>
         public void LatchForShutdown() => latched = true;
 
-        private static void OnProcessQuitting() => processIsShuttingDown = true;
+        // internal, not private, so MainThreadSessionSchedulerTests can arm the
+        // process-wide signal through the same method Application.quitting calls. See
+        // the InternalsVisibleTo note at the top of this file for why that seam is a
+        // handler rather than a setter.
+        internal static void OnProcessQuitting() => processIsShuttingDown = true;
 
         /// <summary>
         /// Installs the one shutdown signal that also exists outside the editor.
@@ -112,9 +151,16 @@ namespace Echo.Harness.Infrastructure
         /// reloads, so this hook needs no re-arm there; that last clause is reasoning
         /// from the absence of reloads in a player, not a measurement, since path C was
         /// never exercised.</para>
+        ///
+        /// <para><c>internal</c> rather than <c>private</c>: this is the one
+        /// unconditional path in the class that <i>clears</i> the static, and it is
+        /// idempotent - the reset is a plain assignment and the subscription removes
+        /// before it adds - so the test fixture calls it to restore the process-wide
+        /// signal after deliberately arming it. That puts the restore on a real
+        /// production path instead of a setter invented for the test.</para>
         /// </summary>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-        private static void InstallRuntimeShutdownSignals()
+        internal static void InstallRuntimeShutdownSignals()
         {
             // Reset first - but the reason given here is narrower than the one this
             // method was handed. That reason was: "With Enter Play Mode Options and
@@ -150,7 +196,10 @@ namespace Echo.Harness.Infrastructure
 #if UNITY_EDITOR
         private static void OnBeforeAssemblyReload() => processIsShuttingDown = true;
 
-        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        // internal for the same reason as OnProcessQuitting: it is the handler the
+        // editor installer subscribes, so a test that calls it directly is exercising
+        // the real arming and clearing paths, switch included.
+        internal static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
             switch (state)
             {
@@ -172,6 +221,29 @@ namespace Echo.Harness.Infrastructure
                     // because RuntimeInitializeOnLoadMethod did not re-run. From that
                     // point on this is the only signal left on path A.
                     processIsShuttingDown = true;
+                    break;
+                case PlayModeStateChange.EnteredEditMode:
+                    // Not symmetry for its own sake. Nothing reloads the domain on
+                    // leaving play mode here - see LatchForShutdown's doc comment for
+                    // the measurement - so without this line the flag armed at
+                    // ExitingPlayMode above stays true for the whole of the edit-mode
+                    // session that follows. Harmless while nothing outside the PlayMode
+                    // fixture constructs this type; the moment a container registers it,
+                    // an EditMode run in an editor process that has already played once
+                    // would resolve a scheduler that reports IsLatched and refuses every
+                    // hop. The finding logs this callback on both path A runs, arriving
+                    // after Application.quitting, so it is the last word on that path.
+                    //
+                    // Measured, not inferred, and in both directions. With this handler
+                    // temporarily logging a freshly constructed scheduler's IsLatched,
+                    // a play session was entered and exited: the EnteredEditMode entry
+                    // read True - the flag armed at ExitingPlayMode arriving intact in
+                    // edit mode - and an EditorApplication.delayCall queued from the
+                    // same handler, i.e. running on an ordinary edit-mode tick after
+                    // the transition, read False. With this assignment commented out
+                    // and nothing else changed, that same delayCall read True. The
+                    // stale flag is real and this line is what clears it.
+                    processIsShuttingDown = false;
                     break;
             }
         }

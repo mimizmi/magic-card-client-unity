@@ -47,17 +47,19 @@ drift gate itself, they are **enforced locally, not in CI** — CI invokes
 |---|---|---|
 | Static | package/version pins, dependency direction, forbidden references, fixture shape, fixture-vs-Go drift | API compatibility across upgrades |
 | EditMode | frame codec, message IDs, all 39 typed DTOs driven from the fixture, nullable/omitempty behavior, nested view tree, protocol session routing and correlation, fakes, DI, third-party type resolution, optional xLua probe, real TCP framing/cancellation/backpressure against a byte-level loopback, and a live socket against the remote Go server | catalogs, Lua VM, gameplay, reconnect after a dropped link |
-| PlayMode | UniTask player-loop yield, R3 disposal, UI Toolkit data source, the main-thread scheduler hop | scenes, final UI, assets, device input |
+| PlayMode | UniTask player-loop yield, R3 disposal, UI Toolkit data source, the main-thread scheduler hop, and the scheduler's shutdown latch on both its per-instance and its process-wide arming path | scenes, final UI, assets, device input; whether the shutdown handlers are actually *subscribed* — see the latch row below |
 | Go | existing repository unit/integration baseline | a locally spawned server; the end-to-end tier talks to a remote one and belongs to the EditMode row |
 | Performance | framework installed | budgets and measurements |
 
 ## Transport and session properties
 
 Each row is a property the transport or the session now guarantees, and the test
-that would fail if it stopped holding. Two of them are marked **mutation-verified**:
+that would fail if it stopped holding. Three of them are marked **mutation-verified**:
 the property was removed from the production code and the test was confirmed to
-fail, because both are the kind of claim a test can assert while passing for an
-unrelated reason.
+fail, because each is the kind of claim a test can assert while passing for an
+unrelated reason. The count was two until the shutdown latch's process-wide arming
+path got a test; that row is the third, and it was added precisely because a review
+mutation showed the whole suite staying green without it.
 
 | Property | Enforced by | What would otherwise pass unnoticed |
 |---|---|---|
@@ -67,7 +69,9 @@ unrelated reason.
 | The send budget refuses the message past the server's limit, and `Pong` is exempt | `TcpTransportSendTests.ExceedingTheBudgetThrowsAndKeepsTheConnection`, `.PongIsExemptFromTheBudget`; `SendBudgetTests` for the token arithmetic | The server's limit is a compile-time 30 per second and exceeding it closes the connection with no error frame — on the wire indistinguishable from a pulled cable. A budget that could swallow a heartbeat reply would cause exactly the disconnect it exists to prevent. |
 | Silence beyond the read-idle deadline fails the receive, and every frame resets it | `TcpTransportIdleTests.SilenceBeyondTheIdleTimeoutFailsTheReceive`, `.TheIdleDeadlineResetsForEachFrame`, `.ACallerCancellationIsNotReportedAsAnIdleTimeout` | A half-open link the kernel takes minutes to notice, parking the pump indefinitely. The reset is the other half: without it a healthy connection dies at a fixed age, and a test of the timeout alone cannot tell the two apart. |
 | Every dispatched message hops to the session's context before anything reads or writes session state | `ProtocolSessionConfinementTests` (four tests) | **Mutation-verified.** Confinement, not locking, is what makes a plain `Dictionary` of pending requests and a plain `State` property safe once a real socket introduces a second thread — including the request timeout, which fires on a thread-pool thread and must hop before its `finally` touches the single-flight gate. |
-| `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests` (PlayMode, four tests) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. Nothing constructs this type in production yet — see the open checklist item — so PlayMode is currently its only consumer. |
+| `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`, `.SwitchingWhileAlreadyOnTheMainThreadCostsNoFrame`, `.SwitchingWithACancelledTokenOnTheMainThreadThrows`, `.SwitchingWithACancelledTokenOffTheMainThreadAlsoThrows` (PlayMode) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. |
+| A scheduler refuses the hop once the loop is going away, whether it was latched by its own owner or by the process | `MainThreadSessionSchedulerTests.ALatchedSchedulerCancelsInsteadOfQueueingOntoADeadLoop`, `.AnUnlatchedSchedulerStillHops`, `.TheProcessWideSignalLatchesASchedulerThatNeverLatchedItself`, `.ReturningToEditModeClearsTheProcessWideSignal` (PlayMode; the last is `[Test]` and editor-only, the other three are `[UnityTest]`) | **Mutation-verified.** `IsLatched => latched \|\| processIsShuttingDown` rewritten to `=> latched` deletes every process-wide shutdown signal at once, and until these tests existed the whole pipeline stayed green through it — the static, its three handlers and its two installers were all deletable unnoticed. **What no test here covers:** that those handlers are *subscribed*. A PlayMode test cannot stage a real `Application.quitting` or play-mode exit, because the event that would raise it is the one that ends the run; the tests invoke the handlers directly. The subscription's only evidence is a one-off `Editor.log` observation recorded in the Task 7 reports, not something CI repeats. |
+| The type has process-wide side effects with no consumer | nothing — stated here because it is the gap | Its two installers run on **every editor domain load** (`[InitializeOnLoadMethod]`) and **every play-mode entry** (`[RuntimeInitializeOnLoadMethod]`), whether or not an instance exists, so the class is already live in production even though nothing constructs it yet. Task 8 registers it in the container; until then PlayMode is its only *consumer* but not its only executor. See the open wiring item in `docs/migration-checklist.md`. |
 | Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode, three tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
 
 ### The two runners are graded by one function, with one difference
