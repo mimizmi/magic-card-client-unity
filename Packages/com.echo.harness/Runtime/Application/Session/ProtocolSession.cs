@@ -515,16 +515,42 @@ namespace Echo.Harness.Application
                 catch (OperationCanceledException)
                 {
                     // Deliberately silent, and there is one caller who must know
-                    // why. Two things reach here: the pump's own token, cancelled
-                    // by StopAsync or Dispose - both of which fail the waiters
-                    // themselves, so there is nothing left to do - and a scheduler
-                    // that refused the hop because the player loop is going away.
-                    // Nothing fails the waiters on that second path. A request in
-                    // flight then waits out its own deadline and is told it timed
-                    // out, which reports a network failure for an orderly quit.
-                    // Whatever drives the lifecycle must reach StopAsync or Dispose
-                    // on shutdown; that, not a wider catch here, is what keeps the
-                    // report honest.
+                    // why. THREE things reach here, and they do not leave the same
+                    // wreckage behind. This used to say two, which was the whole
+                    // error: it named the route that cleans up after itself and
+                    // only one of the two that do not.
+                    //
+                    // 1. The pump's own token, cancelled by CancelPump from
+                    //    StopAsync or Dispose. Both fail every waiter themselves -
+                    //    StopAsync in its finally, Dispose before it launches the
+                    //    disconnect - with a truthful, non-cancellation exception.
+                    //    Nothing is left to do here.
+                    // 2. The token the CALLER handed StartAsync. pumpCancellation is
+                    //    a linked source built from it, so cancelling the caller's
+                    //    token cancels this one without passing through StopAsync or
+                    //    Dispose. Nothing fails the waiters on this route.
+                    // 3. A scheduler that refused the hop because the player loop is
+                    //    going away. Nothing fails the waiters on this route either.
+                    //
+                    // On 2 and 3 a request in flight waits out its own deadline and
+                    // is told it timed out: a fabricated network failure for an
+                    // orderly quit. So whatever drives the lifecycle must reach
+                    // StopAsync or Dispose on shutdown - and must reach it even when
+                    // its own StartAsync token has already been cancelled out from
+                    // under it, which is route 2 and is not hypothetical. The DI
+                    // package this project composes with owns the
+                    // CancellationTokenSource it hands to IAsyncStartable.StartAsync:
+                    // AsyncStartableLoopItem holds one as a readonly field, passes
+                    // its token to every entry point, and cancels it from its own
+                    // Dispose, which the scope's disposal reaches. A driver that
+                    // forwards that token straight into StartAsync - the obvious
+                    // implementation - is therefore exactly a driver whose pump can
+                    // be cancelled before any shutdown hook of its own runs.
+                    // (The package is described rather than named because the
+                    // architecture gate forbids that token anywhere under
+                    // Runtime/Application, which is the same rule that keeps
+                    // container types out of this tier.) Ordering the two, not a
+                    // wider catch here, is what keeps the report honest.
                     return;
                 }
                 catch (Exception exception)
