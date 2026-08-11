@@ -524,7 +524,13 @@ namespace Echo.Harness.Application
                     //    StopAsync or Dispose. Both fail every waiter themselves -
                     //    StopAsync in its finally, Dispose before it launches the
                     //    disconnect - with a truthful, non-cancellation exception.
-                    //    Nothing is left to do here.
+                    //    Nothing is left to do here. CancelPump has a third
+                    //    caller, FaultTheStreamAsync, and it is named here so that
+                    //    the list is complete by statement rather than only by
+                    //    consequence: it cannot arrive at this catch, because the
+                    //    pump reaches it only from the catch below and returns as
+                    //    soon as it comes back, and it fails the waiters before
+                    //    cancelling anything in any case.
                     // 2. The token the CALLER handed StartAsync. pumpCancellation is
                     //    a linked source built from it, so cancelling the caller's
                     //    token cancels this one without passing through StopAsync or
@@ -549,8 +555,17 @@ namespace Echo.Harness.Application
                     // (The package is described rather than named because the
                     // architecture gate forbids that token anywhere under
                     // Runtime/Application, which is the same rule that keeps
-                    // container types out of this tier.) Ordering the two, not a
-                    // wider catch here, is what keeps the report honest.
+                    // container types out of this tier.)
+                    //
+                    // What that obligation needs is PROMPTNESS, not ordering.
+                    // Reaching StopAsync or Dispose after the pump has already
+                    // exited still repairs the report, because FailPendingRequests
+                    // publishes truthfully whenever it runs; what cannot be
+                    // repaired is a waiter whose own deadline elapsed first and
+                    // that has already been told it timed out. Ordering the
+                    // shutdown ahead of the cancellation is one way to guarantee
+                    // that, not the requirement itself - and a wider catch here is
+                    // not a way to guarantee it at all.
                     return;
                 }
                 catch (Exception exception)

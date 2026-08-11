@@ -11,6 +11,7 @@ namespace Echo.Harness.Tests.EditMode
     {
         private string savedHost;
         private string savedPort;
+        private bool environmentSaved;
 
         // Only one test below sets these, but the save/restore sits on the fixture
         // for the reason ServerEndpointTests puts it there: ECHO_SERVER_HOST is
@@ -31,18 +32,60 @@ namespace Echo.Harness.Tests.EditMode
         // every domain reload in it. A run that leaks one poisons every later run
         // in the same editor, and reverting the source does not undo it, because
         // the next SetUp saves the poisoned value and the TearDown puts it back.
+        //
+        // environmentSaved, not a null check on savedHost, because null is a
+        // legitimate saved value - it is what GetEnvironmentVariable returns on
+        // every machine that has not opted into the end-to-end tier. Without the
+        // flag, a SaveEnvironment that never runs is indistinguishable from one
+        // that ran on such a machine, and the measurement says that gap is real:
+        // deleting the [SetUp] attribute below - method and TearDown untouched -
+        // left this whole suite green. The damage it hides is the opposite of the
+        // deleted TearDown's. Restoring a null nobody saved SILENTLY UNSETS
+        // ECHO_SERVER_HOST for the rest of the editor session, so
+        // GoServerEndToEndTests skips rather than fails - and three skips of that
+        // class is the sanctioned state, so the gate reports success. Invisible
+        // by construction, where the deleted TearDown was loud.
         [SetUp]
         public void SaveEnvironment()
         {
             savedHost = Environment.GetEnvironmentVariable(ServerEndpoint.HostVariable);
             savedPort = Environment.GetEnvironmentVariable(ServerEndpoint.PortVariable);
+            environmentSaved = true;
         }
 
         [TearDown]
         public void RestoreEnvironment()
         {
-            Environment.SetEnvironmentVariable(ServerEndpoint.HostVariable, savedHost);
-            Environment.SetEnvironmentVariable(ServerEndpoint.PortVariable, savedPort);
+            var saved = environmentSaved;
+            var host = savedHost;
+            var port = savedPort;
+
+            // Cleared first, and before anything can throw. NUnit reuses one
+            // fixture instance for every test in the class, so a flag left set
+            // would let the next test's TearDown act on a save it never made.
+            environmentSaved = false;
+            savedHost = null;
+            savedPort = null;
+
+            if (!saved)
+            {
+                // Unset rather than left alone, so this fixture cannot leave its
+                // placeholder host behind for the rest of the editor session.
+                // That is also what the unguarded version did by accident, so
+                // this adds no new outcome - only the noise it was missing.
+                Environment.SetEnvironmentVariable(ServerEndpoint.HostVariable, null);
+                Environment.SetEnvironmentVariable(ServerEndpoint.PortVariable, null);
+                Assert.Fail(
+                    "SaveEnvironment did not run, so there is nothing to restore. " +
+                    "Check that [SetUp] is still on it: without it this TearDown " +
+                    "writes a null nobody saved over " + ServerEndpoint.HostVariable +
+                    " after every test here, which unsets it for the rest of the " +
+                    "editor session and turns the end-to-end tier into a skip the " +
+                    "gate is willing to call success.");
+            }
+
+            Environment.SetEnvironmentVariable(ServerEndpoint.HostVariable, host);
+            Environment.SetEnvironmentVariable(ServerEndpoint.PortVariable, port);
         }
 
         [Test]
@@ -97,11 +140,31 @@ namespace Echo.Harness.Tests.EditMode
         // static half still covers Application.quitting and ExitingPlayMode, which
         // is exactly why nothing would fail loudly.
         //
-        // Two resolves of the same interface is the whole check: VContainer keys a
-        // singleton by its Registration, so the instance ProtocolSession is
-        // constructed with is the instance a direct resolve returns. Reaching into
-        // ProtocolSession's private scheduler field would assert the same fact
-        // through reflection and would break on a rename that changes nothing.
+        // Two resolves of the same interface from the ROOT is NOT the whole
+        // check, which is what the child-scope half below is for. Measured:
+        // flipping all five registrations from Singleton to Scoped left the five
+        // root assertions green. VContainer routes a root-level Scoped resolve to
+        // its one root scope, so both resolves come back the same object; a CHILD
+        // scope takes the other branch and builds its own. Under Scoped, the
+        // moment a child scope exists - docs/migration-checklist.md still carries
+        // "define app/session/scene lifetime scopes", plural, as an open item -
+        // every scope gets its own ProtocolSession over its own TcpTransport,
+        // which is verbatim the defect the first paragraph above says this test
+        // exists to prevent, plus its own scheduler for LatchForShutdown to latch
+        // where the session will never see it. Resolving through a child scope is
+        // the only assertion here that tells Scoped from Singleton.
+        //
+        // The root pair is kept even though the child assertions subsume it. It
+        // is what makes the first reported failure name the mistake, and that is
+        // measured, not assumed: Transient reports "IProtocolSession must be a
+        // singleton", Scoped leaves the root pair intact and reports "not one per
+        // scope". Those are different edits to fix.
+        //
+        // Reaching into ProtocolSession's private scheduler field would assert
+        // the same fact through reflection and would break on a rename that
+        // changes nothing: VContainer keys a singleton by its Registration, so
+        // the instance ProtocolSession is constructed with is the instance a
+        // direct resolve returns.
         //
         // NUnit 3.5 as shipped by com.unity.ext.nunit has no Assert.Multiple, so
         // each assertion carries the name of what it pins; only the first failure
@@ -134,6 +197,36 @@ namespace Echo.Harness.Tests.EditMode
                 container.Resolve<IElapsedTime>(),
                 Is.SameAs(container.Resolve<IElapsedTime>()),
                 "IElapsedTime must be a singleton.");
+
+            // A child scope resolves what it does not register by walking up to
+            // the root, so under Singleton each of these is the same object the
+            // root just handed out. Under Scoped the child builds its own, and
+            // under Transient everyone does. All five, not just the session: a
+            // single registration flipped to Scoped is caught only by its own
+            // line, and the scheduler is the one where that is silent.
+            using var child = container.CreateScope();
+
+            Assert.That(
+                child.Resolve<IProtocolSession>(),
+                Is.SameAs(container.Resolve<IProtocolSession>()),
+                "One IProtocolSession for the whole app, not one per scope.");
+            Assert.That(
+                child.Resolve<ITransport>(),
+                Is.SameAs(container.Resolve<ITransport>()),
+                "One ITransport for the whole app, or a scope opens a second socket.");
+            Assert.That(
+                child.Resolve<ISessionScheduler>(),
+                Is.SameAs(container.Resolve<ISessionScheduler>()),
+                "One ISessionScheduler for the whole app, or the shutdown latch " +
+                "is set on an instance the session never sees.");
+            Assert.That(
+                child.Resolve<IClock>(),
+                Is.SameAs(container.Resolve<IClock>()),
+                "One IClock for the whole app, not one per scope.");
+            Assert.That(
+                child.Resolve<IElapsedTime>(),
+                Is.SameAs(container.Resolve<IElapsedTime>()),
+                "One IElapsedTime for the whole app, not one per scope.");
         }
 
         // The tests above resolve every port and would keep passing with the
