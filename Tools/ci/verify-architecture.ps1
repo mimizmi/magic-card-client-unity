@@ -122,7 +122,8 @@ $ExpectedRuntimeReferences = [ordered]@{
         'Echo.Harness.Application',
         'Echo.Harness.Infrastructure',
         'Echo.Harness.Presentation',
-        'VContainer')
+        'VContainer',
+        'UniTask')
 }
 
 # The reference list alone does not enforce layer purity; these two flags do.
