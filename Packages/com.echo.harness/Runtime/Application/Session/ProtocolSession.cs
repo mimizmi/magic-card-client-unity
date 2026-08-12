@@ -334,18 +334,37 @@ namespace Echo.Harness.Application
         /// the player loop stops without any of the three signals reaching the
         /// scheduler.</para>
         ///
-        /// <para>What still bounds it beyond that is a schedule fact rather than a
-        /// design one, so do not lean on it: registration is lazy and nothing
-        /// resolves the graph yet. There is no LifetimeScope and no scene in this
-        /// repository, and Configure has no caller outside the EditMode smoke test,
-        /// so no session is started and no request is ever in flight from anything
-        /// the composition root wires. A bootstrap scene that starts the session ends
-        /// that, and it must be paired with a shutdown that reaches StopAsync or
-        /// Dispose - those are what fail the waiters with a truthful,
-        /// non-cancellation exception. Without one, a latched pump leaves through the
-        /// OperationCanceledException catch in RunPumpAsync, nothing answers the
-        /// waiter, and the caller is told its request timed out: a fabricated network
-        /// failure for an orderly quit.</para>
+        /// <para><b>The schedule fact that used to follow has expired.</b> It read:
+        /// "registration is lazy and nothing resolves the graph yet. There is no
+        /// LifetimeScope and no scene in this repository, and Configure has no caller
+        /// outside the EditMode smoke test, so no session is started and no request
+        /// is ever in flight from anything the composition root wires." Every clause
+        /// of that is now false. HarnessLifetimeScope is a LifetimeScope,
+        /// Assets/Scenes/Bootstrap.unity carries one, its Configure calls the
+        /// composition root's, and the entry point it registers - HarnessSessionDriver
+        /// - calls StartAsync whenever an endpoint is configured. A session is
+        /// started and a request can be in flight from what the composition root
+        /// wires, so nothing about the schedule bounds this any more. Do not restore
+        /// the sentence; check the scene and the driver instead.</para>
+        ///
+        /// <para>It also named the condition that would make its own expiry safe -
+        /// "it must be paired with a shutdown that reaches StopAsync or Dispose" -
+        /// and that arrived in the same change rather than after it. The driver
+        /// reaches StopAsync from three places: the process quit signal, an editor
+        /// assembly reload, and its own Dispose, which covers a scope torn down with
+        /// no quit at all. Those are what fail the waiters with a truthful,
+        /// non-cancellation exception. So what is left is the residual the paragraph
+        /// above already names and nothing wider - a player loop that stops without
+        /// any of the scheduler's shutdown signals reaching it. There a latched pump
+        /// leaves through the OperationCanceledException catch in RunPumpAsync,
+        /// nothing answers the waiter, and the caller is told its request timed out:
+        /// a fabricated network failure for an orderly quit.</para>
+        ///
+        /// <para>One thing the swallow below no longer loses, and one it still does.
+        /// A hop that fails for a reason other than shutdown now publishes a fault
+        /// instead of vanishing. Who reads it is a separate question and the honest
+        /// answer today is nobody: no production type subscribes to faults, so that
+        /// publish reaches an empty handler list until a sink exists.</para>
         /// </summary>
         private async UniTask SwitchToSessionContextForTeardownAsync()
         {
@@ -353,11 +372,49 @@ namespace Echo.Harness.Application
             {
                 await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
             }
-            catch (Exception)
+            catch (OperationCanceledException)
             {
-                // See above: nothing here may outrank the failure being reported.
+                // Orderly, and it is the scheduler rather than any caller that puts
+                // this shape here. The hop is passed CancellationToken.None, so no
+                // token a caller holds can cancel it; what can is the scheduler's
+                // own shutdown latch, which refuses once the player loop is going
+                // away. Reporting that would make every ordinary quit publish a
+                // fault.
+            }
+            catch (Exception ex)
+            {
+                // Still swallowed, for the reason above: nothing here may outrank
+                // the failure being reported to the caller.
                 // AFailingTeardownHopDoesNotReplaceTheTimeout and its cancellation
-                // sibling are what hold this catch in place.
+                // sibling are what hold that half in place. What is new is that it
+                // is no longer silent. The finally that follows un-registers this
+                // request's gate entry while running off the session's context, and
+                // a reader of faultHandlers is the only place that can ever surface
+                // it - so, plainly: nothing outside the tests subscribes yet, and
+                // today this write reaches an empty handler list. It is written
+                // anyway, because the alternative is a defect that leaves nothing
+                // behind for a sink to find on the day one exists.
+                //
+                // DispatchFailure rather than SubscriberFailure. That member is
+                // spoken for - DeliverToSubscribers grades a fault-handler callback
+                // that threw, and no subscriber failed here. TransportFailure would
+                // be worse: it is what FaultTheStreamAsync publishes when the byte
+                // stream is gone, and this link is untouched and the session still
+                // Connected. What is left is the member defined as the failure
+                // nobody predicted, against the same single-threading invariant the
+                // hop exists to keep, and it carries the exception's type name for
+                // the same reason that publish does. The fit is not exact and is not
+                // claimed to be; a member of its own was not added because that is
+                // not a decision this task may take alone.
+                //
+                // default for the MessageId, because the failure belongs to no
+                // single message - which is also what tells it apart from the
+                // per-message DispatchFailure the pump publishes.
+                PublishFault(new SessionFault(
+                    SessionFaultKind.DispatchFailure,
+                    default,
+                    "A request's teardown hop failed, so its gate entry was " +
+                    $"un-registered off the session context: {ex.GetType().Name}: {ex.Message}"));
             }
         }
 

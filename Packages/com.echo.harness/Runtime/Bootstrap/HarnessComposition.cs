@@ -37,11 +37,16 @@ namespace Echo.Harness.Bootstrap
         /// clean, so the role is named instead of the type.)</para>
         ///
         /// <para><b>Registering is not resolving.</b> Every Register call below is
-        /// lazy, so nothing is constructed until something asks. Nothing in this
-        /// repository asks yet: this method has no caller outside the EditMode smoke
-        /// test until Task 9 lands a LifetimeScope. That is what still bounds the
-        /// shutdown exposure described on
-        /// <c>ProtocolSession.SwitchToSessionContextForTeardownAsync</c>.</para>
+        /// lazy, so nothing is constructed until something asks. Something now does:
+        /// <c>HarnessLifetimeScope</c> calls the overload above from
+        /// <c>Assets/Scenes/Bootstrap.unity</c>, and the entry point it registers
+        /// starts the session. This paragraph used to end "no caller outside the
+        /// EditMode smoke test until Task 9 lands a LifetimeScope. That is what still
+        /// bounds the shutdown exposure described on
+        /// <c>ProtocolSession.SwitchToSessionContextForTeardownAsync</c>" - and that
+        /// bound is gone. What replaced it is stated on that method and is a property
+        /// of the shutdown path rather than of the schedule, so read it there rather
+        /// than inferring anything from this one.</para>
         /// </summary>
         public static void Configure(IContainerBuilder builder, EndpointResolution endpoint)
         {

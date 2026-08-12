@@ -197,6 +197,101 @@ namespace Echo.Harness.Tests.EditMode
                 "what happened, whatever the hop out did.");
         }
 
+        /// <summary>
+        /// The third of the teardown-hop family, and the one that asks what the
+        /// session RECORDED rather than what the caller received. Its two halves
+        /// differ only in the exception the hop comes back with, because that is
+        /// the entire distinction the catch pair draws: a cancelled hop is the
+        /// shutdown path and must stay silent, while any other failure means the
+        /// finally below it un-registered a gate entry off the session's context
+        /// with nothing anywhere recording that it happened.
+        ///
+        /// <para><b>NextFailure rather than a scheduler double of its own, and the
+        /// cancelled half is the reason.</b> The hop passes CancellationToken.None,
+        /// so no token this test holds can cancel it. The one production shape that
+        /// does is MainThreadSessionScheduler's latch, which throws a bare
+        /// OperationCanceledException out of an <c>async UniTask</c> method that has
+        /// not yet awaited - so it reaches the awaiter through
+        /// UniTask.FromException, which turns an OperationCanceledException into
+        /// FromCanceled. RecordingSessionScheduler hands an armed failure to
+        /// UniTask.FromException too, so arming it with an
+        /// OperationCanceledException reproduces that route exactly rather than
+        /// approximating it. A double that stored the exception and threw it out of
+        /// the call would not.</para>
+        ///
+        /// <para>Nothing is enqueued on the transport, so the pump is parked in
+        /// ReceiveAsync and cannot consume the one-shot before the teardown hop
+        /// reaches it - the condition NextFailure's own summary sets out. The
+        /// helper asserts the one-shot was cleared rather than assuming it.</para>
+        /// </summary>
+        [Test]
+        public void AFailingTeardownHopIsReportedButACancelledOneIsNot()
+        {
+            var fromFailure = RunTimedOutRequestWithHopFailure(
+                new InvalidOperationException("no player loop"), out var switchesAfterFailure);
+
+            Assert.That(fromFailure.Count, Is.EqualTo(1),
+                "A hop that failed for a reason other than shutdown is the one thing " +
+                "on this path that nothing else records.");
+            Assert.That(fromFailure[0].Kind, Is.EqualTo(SessionFaultKind.DispatchFailure));
+            Assert.That(fromFailure[0].MessageId, Is.EqualTo(default(MessageId)),
+                "The failure belongs to no single message, which is also what tells " +
+                "it apart from the per-message DispatchFailure the pump publishes.");
+            Assert.That(fromFailure[0].Diagnostic, Does.Contain("off the session context"));
+
+            // The type name is asserted separately because dropping it survived a
+            // mutation that this test was already supposed to cover. "no player
+            // loop" on its own names neither what threw nor where to look, which is
+            // the reason the pump's DispatchFailure carries the type too.
+            Assert.That(fromFailure[0].Diagnostic, Does.Contain("InvalidOperationException"));
+            Assert.That(switchesAfterFailure, Is.EqualTo(0),
+                "SwitchCount records successful switches only, so an armed failure " +
+                "must leave it alone. Zero is what separates 'the hop ran and threw' " +
+                "from 'the hop quietly succeeded and the fault came from elsewhere'.");
+
+            var fromCancel = RunTimedOutRequestWithHopFailure(
+                new OperationCanceledException(), out var switchesAfterCancel);
+
+            Assert.That(fromCancel, Is.Empty,
+                "A latched scheduler is an orderly quit. Reporting it would make " +
+                "every shutdown look like a failure.");
+            Assert.That(switchesAfterCancel, Is.EqualTo(0),
+                "The cancelled half must reach the hop too, or its silence proves " +
+                "nothing.");
+        }
+
+        /// <summary>
+        /// Drives one request to its deadline with the teardown hop armed to fail,
+        /// and returns what the session published. The caller's TimeoutException is
+        /// asserted here rather than returned because it is evidence rather than
+        /// subject matter: that catch clause is the only place this hop is taken
+        /// from, so a caller that received the timeout is a caller whose request
+        /// entered the frame the hop lives in.
+        /// </summary>
+        private static List<SessionFault> RunTimedOutRequestWithHopFailure(
+            Exception hopFailure, out int switchCountAfter)
+        {
+            using var session = CreateStarted(out _, out var scheduler, out var faults);
+
+            scheduler.NextFailure = hopFailure;
+
+            Assert.Throws<TimeoutException>(
+                () => session.RequestAsync<LoginResponseDto>(
+                    MessageId.LoginRequest,
+                    new LoginRequestDto { PlayerName = "redacted" },
+                    TimeSpan.FromMilliseconds(50),
+                    CancellationToken.None).AsTask().GetAwaiter().GetResult(),
+                "The caller is still owed its deadline, whatever the hop out did.");
+
+            Assert.That(scheduler.NextFailure, Is.Null,
+                "The one-shot must have been consumed. Still armed would mean the " +
+                "hop never reached it, and every assertion above would be about a " +
+                "session that took no failing hop at all.");
+
+            switchCountAfter = scheduler.SwitchCount;
+            return faults;
+        }
+
         [Test]
         public void AFailingHopFaultsTheStreamRatherThanDyingUnobserved()
         {
