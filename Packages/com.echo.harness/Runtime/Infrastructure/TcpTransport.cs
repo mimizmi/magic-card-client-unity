@@ -139,7 +139,15 @@ namespace Echo.Harness.Infrastructure
             using var registration = cancellationToken.Register(() => connecting.Close());
             try
             {
-                await connecting.ConnectAsync(options.Host, options.Port).AsUniTask();
+                // useCurrentSynchronizationContext: false, for the reason spelled
+                // out at the gate wait in SendAsync. This site was not in the plan
+                // that added the other two, and including it is deliberate:
+                // TcpClient.ConnectAsync(string, int) returns a Task, so it binds the
+                // same eager FromCurrentSynchronizationContext() and a context-less
+                // caller cannot open a link at all. Fixing the send and leaving this
+                // would have left the one call that must succeed first still
+                // carrying the defect the send fix exists to remove.
+                await connecting.ConnectAsync(options.Host, options.Port).AsUniTask(false);
 
                 // Published ahead of the fields that advertise a usable transport,
                 // so a send can never find a Connected transport with no budget
@@ -212,7 +220,36 @@ namespace Echo.Harness.Infrastructure
 
             // Acquired outside the try, so a cancelled or failed WaitAsync cannot
             // reach a finally that releases a gate it never took.
-            await sendGate.WaitAsync(cancellationToken).AsUniTask();
+            // useCurrentSynchronizationContext: false, because the default calls
+            // TaskScheduler.FromCurrentSynchronizationContext() eagerly - it is an
+            // argument, evaluated before any continuation is registered - and that
+            // throws InvalidOperationException on a thread that has no context. It
+            // throws before this gate is taken, so a context-less caller got a
+            // bookkeeping failure naming a TaskScheduler in place of a transport one.
+            //
+            // Nothing here needs the caller's context: the continuation only takes
+            // the gate, and everything it then touches is either volatile or under
+            // the gate.
+            //
+            // It does change where the continuation runs, and that is a real change
+            // rather than a technicality. The default posts the continuation to the
+            // caller's SynchronizationContext, so on the main thread the rest of
+            // SendAsync used to resume there; false selects TaskScheduler.Current,
+            // which on the main thread is the thread pool scheduler and not the
+            // player loop. Measured on this editor rather than assumed: a gate wait
+            // that genuinely suspends resumed on a pool thread with a null context
+            // in 3 of 3 samples, while an uncontended wait - already complete when
+            // it is awaited - resumed inline on the calling thread in only 1 of 5.
+            // So a caller must no longer assume a send hands it back on the main
+            // thread, and on an uncontended gate it cannot assume the opposite
+            // either. That race is also why reverting the flush below on its own
+            // leaves the neighbouring send tests green but many times slower.
+            //
+            // Safe here because nothing this class does after the gate touches an
+            // engine API, and ProtocolSession does not lean on it: its pump hops
+            // explicitly through ISessionScheduler after every receive, which is
+            // the one place the session's main-thread confinement is decided.
+            await sendGate.WaitAsync(cancellationToken).AsUniTask(false);
             try
             {
                 // Captured once for the reason spelled out at ReadExactlyAsync's
@@ -268,7 +305,16 @@ namespace Echo.Harness.Infrastructure
                     await active
                         .WriteAsync(new ReadOnlyMemory<byte>(frame), cancellationToken)
                         .AsUniTask();
-                    await active.FlushAsync(cancellationToken).AsUniTask();
+                    // false for the same reason as the gate wait. The write above
+                    // cannot take the flag - AsUniTask over a ValueTask has no such
+                    // overload in UniTask 2.5.11, only the parameterless
+                    // `async UniTask AsUniTask(this ValueTask task) => await task;`
+                    // - and it does not need one: a bare await captures the current
+                    // context rather than demanding a TaskScheduler from it, so a
+                    // null context resumes on the pool instead of throwing. Flush
+                    // returns a Task, so it is on the throwing side of that line and
+                    // has to be told.
+                    await active.FlushAsync(cancellationToken).AsUniTask(false);
                 }
                 // The same partition as ReadExactlyAsync's, and bare on the same two
                 // trailing clauses for the reason spelled out there. Do not make them

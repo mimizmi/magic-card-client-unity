@@ -43,6 +43,25 @@ namespace Echo.Harness.Application
         /// </summary>
         UniTask SendAsync(TransportMessage message, CancellationToken cancellationToken);
 
+        /// <summary>
+        /// <b>Cancelling a receive means abandoning the link.</b> Implementations
+        /// close the connection on any cancellation of this token, because closing
+        /// the socket is the only way this runtime can unpark a blocked read. That
+        /// is the contract rather than an implementation accident: a caller must
+        /// not cancel a receive to pause reading, to apply backpressure, or to
+        /// impose a per-message deadline, because all three destroy the transport
+        /// as a side effect.
+        ///
+        /// <para>ProtocolSession honours this today, and the reason is worth
+        /// stating precisely, because it is not one choke point. The token it
+        /// passes comes from a source linked to the one handed to StartAsync, so a
+        /// receive is cancelled either by CancelPump or by the caller cancelling
+        /// the whole session - and both of those are teardown. What there is no
+        /// path for is cancelling a receive while meaning to keep using the link.
+        /// That is correct partly by luck: the session has so far had no reason to
+        /// want one. The constraint is written here rather than left to be
+        /// rediscovered by whoever first has that reason.</para>
+        /// </summary>
         UniTask<TransportMessage> ReceiveAsync(CancellationToken cancellationToken);
 
         UniTask DisconnectAsync(CancellationToken cancellationToken);
