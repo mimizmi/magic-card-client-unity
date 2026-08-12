@@ -150,7 +150,8 @@ gives a session scope something to mean.
 **Endpoint resolution: asset → environment variable → not configured.**
 
 The address of the developer's server must not enter the repository. That rule is
-already documented on `RemoteServerEndpoint` and is why `ECHO_SERVER_HOST` has no
+already documented on `ServerEndpoint` — it was on `RemoteServerEndpoint` when this
+was written, and moved with the resolution logic — and is why `ECHO_SERVER_HOST` has no
 default — even a commented-out fallback would put the address in git.
 
 The asset half is a `HarnessEndpointSettings : ScriptableObject` at

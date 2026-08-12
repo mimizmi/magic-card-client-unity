@@ -46,22 +46,25 @@ drift gate itself, they are **enforced locally, not in CI** — CI invokes
 | Layer | Current Harness coverage | Explicitly not covered yet |
 |---|---|---|
 | Static | package/version pins, dependency direction, forbidden references, fixture shape, fixture-vs-Go drift | API compatibility across upgrades |
-| EditMode | frame codec, message IDs, all 39 typed DTOs driven from the fixture, nullable/omitempty behavior, nested view tree, protocol session routing and correlation, fakes, DI, third-party type resolution, optional xLua probe, real TCP framing/cancellation/backpressure against a byte-level loopback, and a live socket against the remote Go server | catalogs, Lua VM, gameplay, reconnect after a dropped link |
-| PlayMode | UniTask player-loop yield, R3 disposal, UI Toolkit data source, the main-thread scheduler hop, and the scheduler's shutdown latch on both its per-instance and its process-wide arming path | scenes, final UI, assets, device input; whether the shutdown handlers are actually *subscribed* — see the latch row below |
+| EditMode | frame codec, message IDs, all 39 typed DTOs driven from the fixture, nullable/omitempty behavior, nested view tree, protocol session routing and correlation, fakes, DI, third-party type resolution, optional xLua probe, real TCP framing/cancellation/backpressure against a byte-level loopback, endpoint resolution through both doors, and a live socket against the remote Go server — including one case that resolves the whole session out of the composition root before using it | catalogs, Lua VM, gameplay, reconnect after a dropped link |
+| PlayMode | UniTask player-loop yield, R3 disposal, UI Toolkit data source, the main-thread scheduler hop, the scheduler's shutdown latch on both its per-instance and its process-wide arming path, and the session driver's start/stop lifecycle against a fake transport | scenes, final UI, assets, device input; whether the shutdown handlers are actually *subscribed* — see the latch row below; and the bootstrap scene itself, which no automated test loads — see "What the gate does not enforce" |
 | Go | existing repository unit/integration baseline | a locally spawned server; the end-to-end tier talks to a remote one and belongs to the EditMode row |
 | Performance | framework installed | budgets and measurements |
 
 ## Transport and session properties
 
 Each row is a property the transport or the session now guarantees, and the test
-that would fail if it stopped holding. Five of them are marked **mutation-verified**:
+that would fail if it stopped holding. Six of them are marked **mutation-verified**:
 the property was removed from the production code and the test was confirmed to
 fail, because each is the kind of claim a test can assert while passing for an
 unrelated reason. The count was two until the shutdown latch's process-wide arming
 path got a test; that row was the third, and it was added precisely because a review
 mutation showed the whole suite staying green without it. Task 8 added the fourth and
 fifth, and the fifth is the same story again: the three composition tests the plan
-specified all stayed green with the configured endpoint dropped on the floor.
+specified all stayed green with the configured endpoint dropped on the floor. The
+sixth is the composed-graph end-to-end row, and it was measured the same way — twice,
+once by deleting a registration and once by dropping the endpoint, with its three
+hand-built siblings green through both.
 
 | Property | Enforced by | What would otherwise pass unnoticed |
 |---|---|---|
@@ -73,10 +76,12 @@ specified all stayed green with the configured endpoint dropped on the floor.
 | Every dispatched message hops to the session's context before anything reads or writes session state | `ProtocolSessionConfinementTests` (four tests) | **Mutation-verified.** Confinement, not locking, is what makes a plain `Dictionary` of pending requests and a plain `State` property safe once a real socket introduces a second thread — including the request timeout, which fires on a thread-pool thread and must hop before its `finally` touches the single-flight gate. |
 | `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`, `.SwitchingWhileAlreadyOnTheMainThreadCostsNoFrame`, `.SwitchingWithACancelledTokenOnTheMainThreadThrows`, `.SwitchingWithACancelledTokenOffTheMainThreadAlsoThrows` (PlayMode) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. |
 | A scheduler refuses the hop once the loop is going away, whether it was latched by its own owner or by the process | `MainThreadSessionSchedulerTests.ALatchedSchedulerCancelsInsteadOfQueueingOntoADeadLoop`, `.AnUnlatchedSchedulerStillHops`, `.TheProcessWideSignalLatchesASchedulerThatNeverLatchedItself`, `.ReturningToEditModeClearsTheProcessWideSignal` (PlayMode; the last is `[Test]` and editor-only, the other three are `[UnityTest]`) | **Mutation-verified.** `IsLatched => latched \|\| processIsShuttingDown` rewritten to `=> latched` deletes every process-wide shutdown signal at once, and until these tests existed the whole pipeline stayed green through it — the static, its three handlers and its two installers were all deletable unnoticed. **What no test here covers:** that those handlers are *subscribed*. A PlayMode test cannot stage a real `Application.quitting` or play-mode exit, because the event that would raise it is the one that ends the run; the tests invoke the handlers directly. The subscription's only evidence is a one-off `Editor.log` observation recorded in the Task 7 reports, not something CI repeats. |
-| The whole session stack resolves from the composition root, once | `CompositionSmokeTests.HarnessComposition_ResolvesTheWholeSessionStack` (both `[TestCase]`s), `.HarnessComposition_RegistersTheSessionAsASingleton` | This row replaces "the type has process-wide side effects with no consumer", which Task 8 made false. `MainThreadSessionScheduler` now has a production consumer: `HarnessComposition` registers it as `ISessionScheduler`, and deleting that one line fails all three tests. Its two installers still run on **every editor domain load** (`[InitializeOnLoadMethod]`) and **every play-mode entry** (`[RuntimeInitializeOnLoadMethod]`) whether or not an instance exists, so the class was live in production before anything constructed it — that part was and remains true. **What is still not covered:** registering is not resolving. Every registration is lazy and nothing outside this EditMode fixture calls `Configure`; there is no `LifetimeScope` and no scene, so no session is started or stopped. Task 9 is what makes the lifecycle real, and what must reach `StopAsync` or `Dispose` on the way out — see the note on `ProtocolSession.SwitchToSessionContextForTeardownAsync`. |
+| The whole session stack resolves from the composition root, once | `CompositionSmokeTests.HarnessComposition_ResolvesTheWholeSessionStack` (both `[TestCase]`s), `.HarnessComposition_RegistersTheSessionAsASingleton` | This row replaces "the type has process-wide side effects with no consumer", which Task 8 made false. `MainThreadSessionScheduler` now has a production consumer: `HarnessComposition` registers it as `ISessionScheduler`, and deleting that one line fails all three tests. Its two installers still run on **every editor domain load** (`[InitializeOnLoadMethod]`) and **every play-mode entry** (`[RuntimeInitializeOnLoadMethod]`) whether or not an instance exists, so the class was live in production before anything constructed it — that part was and remains true. **The "registering is not resolving" caveat this row used to carry is retired**, and is recorded rather than deleted because the shape of the gap is worth keeping: every registration is lazy, so until something resolved the graph, `Configure` could have registered anything at all and stayed green. `HarnessLifetimeScope` on `Assets/Scenes/Bootstrap.unity` now calls it and registers `HarnessSessionDriver` as an entry point, so a session is started and stopped for real — see the note on `ProtocolSession.SwitchToSessionContextForTeardownAsync` for what the driver owes it on the way out. What remains uncovered is narrower and is listed under "What the gate does not enforce": no automated test loads that scene, and the one test that resolves this graph and then uses it needs an endpoint CI does not have. |
 | A configured endpoint reaches the transport, and an unconfigured one leaves it on its defaults | `CompositionSmokeTests.HarnessComposition_PointsTheTransportAtTheConfiguredEndpoint`, `.HarnessComposition_LeavesTheTransportOnItsDefaultsWhenUnconfigured` | **Mutation-verified**, and it is why these two tests exist at all. Nothing in EditMode connects, so resolving `ITransport` proves only that a transport was built, not where it points. With `Configure` mutated to ignore the endpoint entirely, the three tests above stayed green and only `PointsTheTransportAtTheConfiguredEndpoint` failed. The unconfigured half is the mirror: `EndpointResolution.NotConfigured` carries a null `Host` and a `Port` of `0`, so a straight-through assignment builds a transport aimed at nothing rather than at the loopback default, and again only the dedicated test noticed. |
 | A port outside 1..65535 is refused at every door, not just the environment one | `EndpointResolutionTests.Resolve_RejectsAnAssetPortOutsideTheUsableRange`, `ServerEndpointTests.Constructor_RejectsAPortOutsideTheUsableRange`, `.TryResolveFromEnvironment_RejectsAnUnusablePort` (`0`, `-1`/`"-1"`, `70000`/`"70000"`, plus `"+43966"` and `"not-a-port"` on the environment door) | **Mutation-verified.** Task 6 guarded `ECHO_SERVER_PORT` only; the asset's `port` was a serialized `int` that reached the transport unexamined, and `ServerEndpoint`'s public constructor assigned it unchecked. `0` is what makes that matter rather than being tidy: it is `default(int)`, so a fresh asset or a reset Inspector field holds it, and `Socket` reads it as "let the OS choose" instead of refusing it — the connect then fails at the socket layer and reads as an unreachable server. The range lives once, in `ServerEndpoint.MinPort`/`MaxPort`/`IsUsablePort`; widening `MinPort` to `0` fails one case in each of the three fixtures at once, which is what proves there are not three copies of it. |
-| Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode, three tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
+| Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode; three of its four tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
+| The graph the composition root builds is one that actually talks to the server | `GoServerEndToEndTests.TheComposedGraphConnectsAndProbes` (EditMode) | **Mutation-verified, twice.** The other three end-to-end tests construct their transport, session, clock and scheduler by hand, so all three stay green with `HarnessComposition.Configure` broken — which is the whole reason this fourth one exists. Measured: deleting the `ProtocolSession` registration killed only this test, at `Resolve`, with `VContainerException: No such registration of type: IProtocolSession`; and making the registered `TcpTransportOptions` ignore the configured endpoint and keep the loopback defaults killed only this test again, at connect, with a refused-connection `SocketException`. It is the only test in the repository that fails because the *wiring* is wrong rather than because the *protocol* is. What it does not cover is the entry point: `HarnessLifetimeScope` registers `HarnessSessionDriver` on top of `Configure`, and that half belongs to the PlayMode driver tests. |
+| A driver starts the session when an endpoint is configured, stays quiet when one is not, and finishes its shutdown without needing a frame | `HarnessSessionDriverTests` (PlayMode, six tests, against a fake transport) | An entry point that started nothing, or one whose shutdown returned a `UniTask` still pending when a quit hook already had no frame left to give it. The last of those is asserted rather than assumed, because a transport with a genuinely asynchronous close is a legitimate future change and must produce a warning rather than a session that is never stopped. |
 
 ### The two runners are graded by one function, with one difference
 
@@ -144,25 +149,83 @@ that says so in its name.
 
 ### The end-to-end tier skips itself, and what that costs
 
-`GoServerEndToEndTests` needs `ECHO_SERVER_HOST`. There is no default and the
-address is deliberately not committed — it is a developer endpoint, and a variable
-with no fallback is the whole mechanism keeping it out of the tree. On a machine
-that has not set it the three tests call `Assert.Ignore` and the gate tolerates the
-skip for that one class alone, naming any other class that skips.
+`GoServerEndToEndTests` needs an endpoint, and there are two doors to one: an
+`Assets/Resources/HarnessEndpointSettings.asset` with a host, tried first, and the
+`ECHO_SERVER_HOST` variable second. Neither is committed — the asset and its `.meta`
+are gitignored, and the variable has no default — because it is a developer address
+and a source with no fallback is the whole mechanism keeping it out of the tree. On a
+machine with neither, all four tests in the class call `Assert.Ignore`, and the gate
+tolerates the skip for that one class alone, naming any other class that skips.
 
 The cost is worth stating plainly: **on such a machine the suite goes green having
 never run the one test that can disagree with our own understanding of the
 protocol.** Everything else in the repository — the fakes, the byte-level loopback
 double, even the generated fixture — encodes our reading of the server rather than
 checking it. CI is such a machine, permanently. So the skip count in the runner's
-summary line is not cosmetic: `149/152 passed, 3 skipped` and `152/152 passed` are
+summary line is not cosmetic: `188/192 passed, 4 skipped` and `192/192 passed` are
 different claims about how much is known, and only the second one has been
-contradicted by a real server.
+contradicted by a real server. Both of those figures are measured on this tree, one
+run each way, with the gate exiting 0 both times.
 
-Note that the variable is read by the process running the tests. On the
-connected-editor path that is the **Unity editor**, not the shell invoking
-`verify.ps1`, so setting it in a shell after the editor started has no effect;
-the editor has to have been launched with it.
+**The order of the two doors is not arbitrary, and the reason is a measurement.**
+Whichever process runs the tests is the one that reads the variable, and on the
+connected-editor path that process is the **Unity editor** — not the shell invoking
+`verify.ps1`. An editor inherits its environment block from whatever launched it,
+normally Unity Hub, which is long-running, so a variable set after the Hub started is
+invisible to the editor *however many times the editor alone is restarted*. That was
+measured, not supposed: with the variable set at user scope and a genuinely restarted
+editor, the tier still skipped. The asset is read through `Resources.Load` at test
+time, so it needs no restart at all, and it is the door that works on a machine a
+developer is already using. To exercise the unconfigured half deliberately, rename
+the asset rather than clearing the variable — and rename it back, because `git status`
+reports the renamed file as untracked but says nothing at all about the ignored name
+being gone.
+
+### What the gate does not enforce, and one test that is not reliable
+
+Two checks on the production wiring exist and **neither is gate-enforced**, for the
+same reason: both need an endpoint CI does not have.
+
+1. `GoServerEndToEndTests.TheComposedGraphConnectsAndProbes` is the only automated
+   test that resolves the session from the composition root and then uses it. On any
+   machine without an endpoint — CI, permanently — it skips with the other three, so
+   the graph is proved to *build* by the EditMode composition tests and proved to
+   *work* by nothing.
+2. The manual acceptance check is a human opening `Assets/Scenes/Bootstrap.unity` and
+   pressing Play: the console names the endpoint's source, the session reaches
+   `Connected`, leaving play mode logs no error and no `SessionFault`, and the editor
+   does not hang on exit. No automated test loads that scene. Nothing in the gate runs
+   it, nothing in the gate notices if it is never run again, and it needs a configured
+   endpoint too.
+
+So the scene, and the graph as a running thing rather than a resolvable one, are
+covered by a local run and a person — not by `verify.ps1` and not by CI.
+
+**`MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`
+is intermittently red, and it is still red as of this document.** It asserts that a
+continuation resumes on the main thread after
+`await UniTask.SwitchToMainThread(cancellationToken)`; when it fails it reports
+`Expected: 1 But was: <a thread-pool thread id>`. Two things were measured about it
+during this iteration and both matter:
+
+- On the **batch path** it failed **deterministically**, three runs for three across
+  two commits — and the batch path is the only one CI takes.
+- On the **connected** path it fails roughly **1 in 10**: one red in seven runs when
+  it was first seen, and one red among eleven PlayMode attempts during the last
+  implementation task — eight of those green and two aborted before they produced a
+  verdict — with long green streaks either side (four consecutive pipelines green at
+  one commit, two more while writing this document).
+
+The consequence has to be said rather than left to be inferred: **every "PlayMode
+15/15" recorded for this iteration is a connected-path number from a suite that
+contains an intermittently failing test.** The figure is true of the run it describes
+and is not a claim that the suite is reliable.
+
+And **"do not run the batch path" is not a mitigation.** It is the configuration that
+hides the failure — running only the path where the bug is intermittent instead of
+the path where it is certain. The defect is unfixed and undiagnosed, and is carried
+forward as such; whoever picks it up should start from the batch path, where it
+reproduces every time, rather than from the connected one.
 
 ### A PlayMode run straight after a failed PlayMode run is not fully trustworthy
 
@@ -177,6 +240,33 @@ contaminating UniTask's `PlayerLoopHelper` across PlayMode sessions.
 This is recorded as a property of the apparatus, not a bug anyone is chasing.
 **Re-run before investigating a strange PlayMode failure that follows another
 failure**, and if a fresh editor process reproduces it, then it is real.
+
+### Two more apparatus notes, moved here from a working ledger that is gone
+
+Both were measured during the transport iteration and had no home in the repository
+until now; the notes they came from were never tracked, so this paragraph is the only
+copy.
+
+**A transient CLI exit fails the whole gate on the connected path.** The polling loop
+in `run-unity-tests.ps1` throws on *any* non-zero exit from the `test_status` command,
+including a dispatch timeout that a second poll would have survived — while its
+sibling `Wait-ForUnityCompile` deliberately tolerates an unreachable editor for
+precisely that reason. The two loops grade the same class of event differently. It was
+seen once, as exit code 6 raced against a domain reload, and it has been left alone:
+it fails closed and loudly, which is the safe direction. Note the consequence for
+reading a run, because it is the opposite of the batch path's: **on the connected path
+a non-zero exit means the run produced no verdict at all, so re-run it** rather than
+hunting for a pass/fail line that was never printed. The benign leaked exit code
+belongs to the batch path's connection probe only.
+
+**The heartbeat mutation above is attested, not archived.** The claim that removing
+`ProtocolSession`'s heartbeat reply left the other three assertions passing was
+measured against the live remote server — twice, once with the `PongsSent` assertion
+present (failed, `Expected: greater than 0 But was: 0`) and once with it suppressed
+and the same mutation still in place (passed). No artifact in this repository records
+either run; the evidence is a report made in-session and confirmed by the reviewer who
+demanded it. It cannot be re-derived without a ~25 s run against a server CI never
+reaches. Anyone reopening that question should re-run it rather than trust the sentence.
 
 ## Prerequisites
 

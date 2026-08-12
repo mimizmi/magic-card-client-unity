@@ -10,6 +10,7 @@ using Echo.Harness.Infrastructure;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
 using UnityEngine.TestTools;
+using VContainer;
 
 namespace Echo.Harness.Tests.EditMode
 {
@@ -208,6 +209,53 @@ namespace Echo.Harness.Tests.EditMode
                     var latency = await session.ProbeRoundTripAsync(CancellationToken.None);
                     Assert.That(latency, Is.GreaterThan(TimeSpan.Zero));
                 }
+            });
+        }
+
+        /// <summary>
+        /// The only test in the repository that can fail because the WIRING is wrong
+        /// rather than because the protocol is. Every other case in this fixture
+        /// constructs its transport, session, clock and scheduler by hand, so all of
+        /// them would keep passing with the composition root emptied out; this one
+        /// resolves the session from <c>HarnessComposition</c> and then makes it talk
+        /// to the real server.
+        ///
+        /// <para>Measured rather than claimed: with
+        /// <c>builder.Register&lt;ProtocolSession&gt;(...).As&lt;IProtocolSession&gt;()</c>
+        /// deleted from <c>Configure</c>, this test failed at <c>Resolve</c> and the
+        /// three tests above it passed unchanged.</para>
+        ///
+        /// <para>What it does NOT resolve is the entry point. <c>HarnessLifetimeScope</c>
+        /// registers <c>HarnessSessionDriver</c> on top of <c>Configure</c>, and that
+        /// half is a <c>LifetimeScope</c>'s and belongs to the PlayMode driver tests.
+        /// This is the registration half, exercised against a live socket.</para>
+        /// </summary>
+        [UnityTest]
+        public IEnumerator TheComposedGraphConnectsAndProbes()
+        {
+            var endpoint = RequireEndpoint();
+            return UniTask.ToCoroutine(async () =>
+            {
+                var builder = new ContainerBuilder();
+                HarnessComposition.Configure(
+                    builder,
+                    EndpointResolution.From(endpoint.Host, endpoint.Port, "the end-to-end tier"));
+
+                using var container = builder.Build();
+                var session = container.Resolve<IProtocolSession>();
+
+                await session.StartAsync(CancellationToken.None);
+                Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                    "The graph the bootstrap scene builds reached the real server.");
+
+                var latency = await session.ProbeRoundTripAsync(CancellationToken.None);
+                Assert.That(latency, Is.GreaterThan(TimeSpan.Zero),
+                    "A resolved session that connects but cannot round-trip would " +
+                    "mean the graph is wired to something other than the endpoint " +
+                    "it was configured with.");
+
+                await session.StopAsync(CancellationToken.None);
+                Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
             });
         }
 
