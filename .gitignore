@@ -138,3 +138,13 @@ Desktop.ini
 # this line is the whole control.
 **/HarnessEndpointSettings.asset
 **/HarnessEndpointSettings.asset.meta
+
+# The folder Unity creates to hold that asset, and only that one - anchored,
+# unlike the two lines above, because this excuses a specific folder rather than
+# a file wherever it lands. Assets/Resources/ exists in this repository solely to
+# hold the ignored asset, so it is empty in every fresh clone; git cannot store an
+# empty directory, and a committed Resources.meta with no folder beside it is an
+# orphan Unity deletes on import, handing every clone a spurious deletion.
+# A Resources folder that ever holds committed content should have its meta
+# committed - remove this line then, rather than working around it.
+/Assets/Resources.meta

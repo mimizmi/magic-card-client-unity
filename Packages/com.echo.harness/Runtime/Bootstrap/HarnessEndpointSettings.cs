@@ -87,8 +87,18 @@ namespace Echo.Harness.Bootstrap
     /// which is exactly the not-configured path, with nothing broken to
     /// explain.</para>
     /// </summary>
+    [CreateAssetMenu(
+        menuName = "Echo/Harness Endpoint Settings",
+        fileName = ResourcePath)]
     public sealed class HarnessEndpointSettings : ScriptableObject
     {
+        /// <summary>
+        /// Both the Resources key and the default file name of a newly created
+        /// asset. They must match: <see cref="ResolveFromResources"/> looks the
+        /// asset up by this name, so an asset saved under any other one resolves to
+        /// nothing and reports "not configured" while sitting in plain sight in the
+        /// project window.
+        /// </summary>
         public const string ResourcePath = "HarnessEndpointSettings";
 
         [SerializeField]
