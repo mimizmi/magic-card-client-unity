@@ -37,12 +37,17 @@ $SanctionedSkipClass = 'Echo.Harness.Tests.EditMode.GoServerEndToEndTests'
 # runners are graded identically.
 #
 # They were not. The connected path carried all of this inline while the batch
-# path - the only path CI takes - verified nothing but the process exit code and
-# the existence of the results file. So on CI there was no empty-run guard, no
-# accounting, no skip count, and above all no sanctioned-skip check, which is the
-# whole of the invariant that a test quietly ceasing to run is not a pass. CI is
-# also permanently in the skip state, which is precisely the state that check
-# exists to police.
+# path - the path CI is configured to take - verified nothing but the process exit
+# code and the existence of the results file. So on that path there was no
+# empty-run guard, no accounting, no skip count, and above all no sanctioned-skip
+# check, which is the whole of the invariant that a test quietly ceasing to run is
+# not a pass. A machine with no ECHO_SERVER_HOST is also permanently in the skip
+# state, which is precisely the state that check exists to police.
+#
+# "Configured to take" is meant literally and is not the same as "runs": the
+# unity-tests job needs a self-hosted runner that has never existed, so this batch
+# path has never executed in CI. docs/verification-matrix.md carries the evidence
+# under "CI boundary".
 #
 # $Summary must expose total/passed/failed/skipped/inconclusive; $Results must be
 # one row per test with FullName, Status and Message. Both runners are adapted to
