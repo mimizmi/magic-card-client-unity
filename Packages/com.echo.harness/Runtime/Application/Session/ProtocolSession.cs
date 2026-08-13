@@ -69,6 +69,56 @@ namespace Echo.Harness.Application
                 throw;
             }
 
+            // The hop, and everything below it depends on having taken it. The
+            // transport's connect does not capture a context, so this frame resumes
+            // on whatever thread the socket completed on - a pool one. The three
+            // lines below publish the session as usable from there: they write
+            // State, which is a plain auto-property and not volatile, install
+            // pumpCancellation, and start the pump. A shutdown running on the
+            // session's context at the same moment reads Connecting, calls
+            // CancelPump while pumpCancellation is still null, disconnects, and
+            // settles on Disconnected - and then this continuation lands and
+            // re-marks a session Connected with a live pump after its shutdown
+            // declared itself finished. Taking the hop first puts these writes and
+            // that shutdown on one thread, which is what makes the two orderable at
+            // all.
+            try
+            {
+                await scheduler.SwitchToSessionContextAsync(cancellationToken);
+            }
+            catch
+            {
+                // A session that cannot reach its context must not declare itself
+                // Connected. Everything the session does after this point - the
+                // pump's dispatch, the gate in pendingRequests, the subscriber
+                // lists - is single-threaded only because the context exists to
+                // confine it to, so a Connected session behind an unreachable
+                // context is a promise that cannot be kept. Reported as a failed
+                // start instead, which is a state the caller already handles.
+                //
+                // The link is closed rather than left open, and that is the half
+                // that is not symmetry: the connect SUCCEEDED, so unlike the catch
+                // above there is a real socket here, and abandoning it makes the
+                // server hold the session until its own pong timeout. This close
+                // runs off the context by construction - reaching the context is
+                // the thing that just failed - which is safe in a way the writes
+                // below are not, because DisconnectAsync touches the transport and
+                // none of the session's own collections.
+                State = SessionState.Disconnected;
+                try
+                {
+                    await transport.DisconnectAsync(CancellationToken.None);
+                }
+                catch
+                {
+                    // The hop's failure is what the caller is owed. A close that
+                    // also failed adds nothing it can act on, and letting it win
+                    // would replace the report that names the cause.
+                }
+
+                throw;
+            }
+
             State = SessionState.Connected;
             pumpCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             RunPumpAsync(pumpCancellation.Token).Forget();
@@ -209,7 +259,36 @@ namespace Echo.Harness.Application
             pendingRequests[responseId] = completion;
             try
             {
-                await SendAsync(requestId, payload, cancellationToken);
+                // The send gets a catch of its own, and the reason is that a throw
+                // from here matches NEITHER of the two clauses below: they hang off
+                // the inner try, which this await has not entered yet. Without this
+                // block a failing send leaves the outer try straight for the
+                // finally, and that finally mutates pendingRequests. Since the
+                // transport's send-gate wait no longer captures a context, the throw
+                // arrives on whatever thread failed the write - a thread pool one
+                // for a socket - so the finally would race the pump's Dispatch over
+                // the same unsynchronised Dictionary. Reachable three ways today:
+                // the send budget refusing, a socket write failing, and the
+                // null-stream guard.
+                //
+                // Wrapped around this await alone rather than caught on the outer
+                // try, which would double-hop the two exits below that have already
+                // hopped. Unconditional within it, because this frame cannot tell
+                // which half of SendAsync threw: the session's own validation runs
+                // synchronously on the caller's thread, where a hop costs a switch
+                // and buys nothing, while the transport's runs inside the returned
+                // UniTask and can land anywhere. Paying for the first is the price
+                // of covering the second, and the first is already an argument
+                // error on a request that never left.
+                try
+                {
+                    await SendAsync(requestId, payload, cancellationToken);
+                }
+                catch
+                {
+                    await SwitchToSessionContextForTeardownAsync();
+                    throw;
+                }
 
                 using var timeoutCancellation =
                     CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -220,13 +299,20 @@ namespace Echo.Harness.Application
                         .AttachExternalCancellation(timeoutCancellation.Token);
                     return (TResponse)response;
                 }
-                // Both failing exits hop, and only the exception each produces
-                // differs. Hopping before the throw means hopping before this
-                // frame's finally removes its gate entry; without it the resuming
-                // thread and the pump can mutate pendingRequests concurrently, and
-                // a Dictionary resized from two threads can misroute a response to
-                // subscribers. The success path needs no hop: TrySetResult is
-                // called from Dispatch, which already ran on the context.
+                // ALL THREE failing exits hop. This used to open "Both failing
+                // exits hop", counting only the two below, and that was the whole
+                // error: a failing send is a third exit and it took no hop at all -
+                // it is not caught here, because these clauses hang off the inner
+                // try it never entered. It has its own catch, above. Correcting the
+                // count is the point; the two below are unchanged.
+                //
+                // Only the exception each of these two produces differs. Hopping
+                // before the throw means hopping before this frame's finally
+                // removes its gate entry; without it the resuming thread and the
+                // pump can mutate pendingRequests concurrently, and a Dictionary
+                // resized from two threads can misroute a response to subscribers.
+                // The success path needs no hop: TrySetResult is called from
+                // Dispatch, which already ran on the context.
                 //
                 // Two clauses rather than one widened filter, because the two exits
                 // must stay distinguishable to a caller: a deadline that elapsed is

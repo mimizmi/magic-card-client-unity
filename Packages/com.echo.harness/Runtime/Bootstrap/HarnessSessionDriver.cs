@@ -182,19 +182,28 @@ namespace Echo.Harness.Bootstrap
         ///
         /// <para><c>Status</c> is read before <c>GetResult</c> rather than after,
         /// because <c>GetResult</c> on a pending promise throws and recycles it. A
-        /// pending shutdown is handed to <c>Forget</c> instead - which at least
-        /// routes any eventual exception to UniTask's unobserved handler rather than
-        /// dropping it - and reported as a warning, because on this runtime it will
-        /// not complete: the loop that would resume it is the thing going away.</para>
+        /// pending shutdown is RETURNED to the caller instead - it used to be handed
+        /// straight to <c>Forget</c> here - and reported as a warning, because on
+        /// this runtime it will not complete: the loop that would resume it is the
+        /// thing going away.</para>
+        ///
+        /// <para>The return value is what lets <see cref="Dispose"/> keep the
+        /// ordering promise its own doc comment makes. The two signal hooks have no
+        /// such promise to keep, so they <c>Forget</c> it exactly as this method
+        /// used to - which still routes any eventual exception to UniTask's
+        /// unobserved handler rather than dropping it.</para>
+        ///
+        /// <para>What comes back is <c>UniTask.CompletedTask</c> whenever the
+        /// teardown ended inside this call, failure included: a shutdown that threw
+        /// has ended, and the caller has already been told about it here.</para>
         /// </summary>
-        private void RunShutdownWithoutAFrameToSpare(string signal)
+        private UniTask RunShutdownWithoutAFrameToSpare(string signal)
         {
             try
             {
                 var teardown = ShutdownAsync(CancellationToken.None);
                 if (!teardown.Status.IsCompleted())
                 {
-                    teardown.Forget();
                     Debug.LogWarning(
                         $"[Harness] The shutdown started from {signal} did not " +
                         "complete synchronously, and there is no further player " +
@@ -202,7 +211,7 @@ namespace Echo.Harness.Bootstrap
                         "until the server's own timeout. See the class summary on " +
                         "HarnessSessionDriver: something on the StopAsync path now " +
                         "yields.");
-                    return;
+                    return teardown;
                 }
 
                 teardown.GetAwaiter().GetResult();
@@ -217,14 +226,16 @@ namespace Echo.Harness.Bootstrap
                     $"[Harness] The shutdown started from {signal} failed: " +
                     $"{failure.GetType().Name}: {failure.Message}");
             }
+
+            return UniTask.CompletedTask;
         }
 
         private void OnApplicationQuitting() =>
-            RunShutdownWithoutAFrameToSpare("UnityEngine.Application.quitting");
+            RunShutdownWithoutAFrameToSpare("UnityEngine.Application.quitting").Forget();
 
 #if UNITY_EDITOR
         private void OnBeforeAssemblyReload() =>
-            RunShutdownWithoutAFrameToSpare("AssemblyReloadEvents.beforeAssemblyReload");
+            RunShutdownWithoutAFrameToSpare("AssemblyReloadEvents.beforeAssemblyReload").Forget();
 #endif
 
         // Removed before added, with method groups rather than lambdas so the
@@ -275,6 +286,39 @@ namespace Echo.Harness.Bootstrap
         /// first is route 2 - it cancels the pump without failing any waiter - and
         /// StopAsync is what fails them truthfully. Reversed, an orderly disposal
         /// would report a fabricated timeout.</para>
+        ///
+        /// <para><b>"After the stop" now means after it ENDED, not after it was
+        /// started.</b> This method used to cancel unconditionally on the line
+        /// following the teardown call, and on the branch where the teardown had not
+        /// completed synchronously that cancel arrived while a <c>StopAsync</c> was
+        /// still awaiting its <c>DisconnectAsync</c> - so the guarantee the
+        /// paragraph above states held on the synchronous-close path only, which is
+        /// every transport in this repository today and therefore no transport
+        /// tomorrow. The deferred branch below closes that.</para>
+        ///
+        /// <para><b>The narrower correction, because the paragraph above overstates
+        /// what the old code could actually do.</b> Measured against the shipped
+        /// <c>ProtocolSession</c>: <c>StopAsync</c> calls <c>CancelPump</c> itself,
+        /// synchronously, before its first await - so by the time a cancel on this
+        /// line could run, the pump has already been cancelled BY the stop, and this
+        /// token has no registration left to fire. Route 2 was therefore not
+        /// reachable from here through the shipped stack, and the fabricated timeout
+        /// the paragraph promises was not observable. What was real is the ordering
+        /// violation itself: this driver holds an <c>IProtocolSession</c>, not a
+        /// <c>ProtocolSession</c>, and the promise is made to that interface. Any
+        /// implementation whose stop yields before it fails its waiters was owed the
+        /// ordering and did not get it. Fixing the ordering rather than deleting the
+        /// promise is the choice made here, and this paragraph is why it is not sold
+        /// as a defect that was biting.</para>
+        ///
+        /// <para><b>What the deferral costs, stated rather than hidden.</b> On a real
+        /// quit a pending teardown does not complete - that is the whole subject of
+        /// the class summary - so on that path this token is never cancelled and this
+        /// source is never disposed. That is a bounded leak of one
+        /// <c>CancellationTokenSource</c> in a process that is going away, traded for
+        /// never cancelling ahead of a stop. It is the deferred branch's ONLY
+        /// pending-path outcome: a teardown that never resumes had nothing to
+        /// cancel behind it either.</para>
         /// </summary>
         public void Dispose()
         {
@@ -284,8 +328,56 @@ namespace Echo.Harness.Bootstrap
             }
 
             disposed = true;
-            RunShutdownWithoutAFrameToSpare("IDisposable.Dispose");
+            var teardown = RunShutdownWithoutAFrameToSpare("IDisposable.Dispose");
             RemoveHooks();
+
+            if (teardown.Status.IsCompleted())
+            {
+                CancelTheShutdownToken();
+                return;
+            }
+
+            CancelTheShutdownTokenWhenTheStopEndsAsync(teardown).Forget();
+        }
+
+        /// <summary>
+        /// The tail of <see cref="Dispose"/> for a teardown that had not finished
+        /// when Dispose returned. It exists so that the cancel still follows the
+        /// stop rather than racing it.
+        ///
+        /// <para>The catch is not tidiness. This runs with no caller on the stack,
+        /// so an escaping exception would reach UniTask's unobserved handler and be
+        /// reported as an unrelated crash - the same reason
+        /// <c>ProtocolSession.DisconnectOnDisposeAsync</c> carries one. It is also
+        /// the only place a failure on this branch can be reported at all:
+        /// <see cref="RunShutdownWithoutAFrameToSpare"/> logged nothing for it,
+        /// because when that method returned, the teardown had not yet failed.</para>
+        ///
+        /// <para>The cancel is in a <c>finally</c>, so a stop that ENDED by throwing
+        /// is still a stop that ended. Skipping the cancel there would leave the
+        /// session's pump running on a token nothing will ever cancel, which is a
+        /// worse outcome than the ordering violation this whole change removes.</para>
+        /// </summary>
+        private async UniTaskVoid CancelTheShutdownTokenWhenTheStopEndsAsync(UniTask teardown)
+        {
+            try
+            {
+                await teardown;
+            }
+            catch (Exception failure)
+            {
+                Debug.LogError(
+                    "[Harness] The shutdown started from IDisposable.Dispose failed " +
+                    $"after Dispose returned: {failure.GetType().Name}: {failure.Message}");
+            }
+            finally
+            {
+                CancelTheShutdownToken();
+            }
+        }
+
+        private void CancelTheShutdownToken()
+        {
             shutdown.Cancel();
             shutdown.Dispose();
         }

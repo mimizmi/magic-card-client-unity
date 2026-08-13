@@ -6,6 +6,7 @@ using System.Threading;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
 using Echo.Harness.Bootstrap;
+using Echo.Harness.Contracts;
 using Echo.Harness.Infrastructure;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
@@ -252,6 +253,192 @@ namespace Echo.Harness.Tests.PlayMode
             yield return null;
 
             Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+        }
+
+        // The ordering Dispose's own doc comment asserts, made unconditional.
+        //
+        // Dispose used to cancel its shutdown token on the line after the teardown
+        // call, whether or not that teardown had finished. On the branch where it
+        // had not - a session whose stop genuinely yields - the cancel landed while
+        // a StopAsync was still in flight, which is the reverse of the order the
+        // comment says is required.
+        //
+        // What is asserted here is the ordering itself rather than a downstream
+        // symptom, and that is deliberate. Measured against the shipped
+        // ProtocolSession, the fabricated timeout the comment warns about was NOT
+        // reachable from this line: StopAsync calls CancelPump itself, synchronously,
+        // before its first await, so the pump is already cancelled BY the stop and
+        // this token has no registration left to fire. StallingCloseTransport was
+        // tried first, as the brief suggested, and this is why it does not fit - it
+        // yields the CLOSE, which happens after ProtocolSession has already cancelled
+        // its own pump, so no ordering violation is observable through it. The
+        // promise is made to IProtocolSession, not to ProtocolSession, hence the
+        // local double below: an implementation whose stop yields BEFORE it has done
+        // the work the ordering exists to protect. That is the shape the guarantee
+        // was written for, and the one nothing in this repository was checking.
+        [UnityTest]
+        public IEnumerator DisposeDoesNotCancelUntilTheStopItFollowsHasEnded()
+        {
+            var session = new StallingStopSession();
+            var driver = new HarnessSessionDriver(
+                session, EndpointResolution.From("example.invalid", 43966, "test"));
+
+            yield return driver.StartAsync(CancellationToken.None).ToCoroutine();
+            Assert.That(
+                session.ShutdownTokenCancelled,
+                Is.False,
+                "nothing has asked for a shutdown yet");
+
+            LogAssert.Expect(LogType.Warning, new Regex("did not complete synchronously"));
+
+            driver.Dispose();
+
+            Assert.That(
+                session.StopStarted,
+                Is.True,
+                "Dispose must still reach the stop; deferring the cancel may not " +
+                "turn into deferring the teardown");
+            Assert.That(
+                session.ShutdownTokenCancelled,
+                Is.False,
+                "the stop has not finished, so the cancel that must follow it has " +
+                "no business running yet - cancelling here is route 2 of " +
+                "ProtocolSession.RunPumpAsync's list, which fails no waiter");
+
+            session.ReleaseStop();
+            yield return null;
+
+            Assert.That(
+                session.ShutdownTokenCancelled,
+                Is.True,
+                "once the stop has ended the token must be cancelled after all, or " +
+                "the session's pump is left on a token nothing will ever cancel");
+        }
+
+        // The other end of the deferred branch: a stop that ends by THROWING has
+        // still ended, so the cancel it was holding back must happen anyway.
+        //
+        // Written because the first version of the fix survived a mutation. Dropping
+        // the try/finally around the deferred cancel - so a faulted teardown skipped
+        // the cancel and went to UniTask's unobserved handler instead - left the
+        // whole suite green, this fixture included. The session's pump would then be
+        // left on a token nothing will ever cancel, which is a worse outcome than the
+        // ordering violation the fix removes, and nothing was watching for it.
+        [UnityTest]
+        public IEnumerator DisposeStillCancelsWhenTheStopItFollowedFailed()
+        {
+            var session = new StallingStopSession();
+            var driver = new HarnessSessionDriver(
+                session, EndpointResolution.From("example.invalid", 43966, "test"));
+
+            yield return driver.StartAsync(CancellationToken.None).ToCoroutine();
+
+            LogAssert.Expect(LogType.Warning, new Regex("did not complete synchronously"));
+
+            driver.Dispose();
+
+            Assert.That(
+                session.ShutdownTokenCancelled,
+                Is.False,
+                "the stop has not ended yet, however it is going to end");
+
+            // Reported rather than swallowed, and reported from here rather than from
+            // RunShutdownWithoutAFrameToSpare, which had already returned by the time
+            // this failure existed.
+            LogAssert.Expect(LogType.Error, new Regex("failed after Dispose returned"));
+
+            session.FailStop(new InvalidOperationException("the close threw"));
+            yield return null;
+
+            Assert.That(
+                session.ShutdownTokenCancelled,
+                Is.True,
+                "a stop that ended by throwing is still a stop that ended, so the " +
+                "cancel must follow it. Skipping it leaves the pump on a token " +
+                "nothing will ever cancel.");
+        }
+
+        /// <summary>
+        /// A session whose <c>StopAsync</c> is genuinely still running when it
+        /// returns, and which reports whether the token it was started with has been
+        /// cancelled. <c>ProtocolSession</c> cannot stand in for either half: its
+        /// stop over any transport in this repository completes synchronously, and
+        /// it cancels its own pump before its first await, so the ordering under
+        /// test is unobservable through it.
+        ///
+        /// <para>The cancellation is observed through <c>Register</c> rather than by
+        /// reading <c>IsCancellationRequested</c> on a stored token, because the
+        /// driver disposes its source immediately after cancelling it and this test
+        /// should not depend on what a disposed source answers.</para>
+        /// </summary>
+        private sealed class StallingStopSession : IProtocolSession
+        {
+            private readonly UniTaskCompletionSource stop = new UniTaskCompletionSource();
+
+            public SessionState State { get; private set; } = SessionState.Disconnected;
+
+            public bool StopStarted { get; private set; }
+
+            public bool ShutdownTokenCancelled { get; private set; }
+
+            public UniTask StartAsync(CancellationToken cancellationToken)
+            {
+                cancellationToken.Register(() => ShutdownTokenCancelled = true);
+                State = SessionState.Connected;
+                return UniTask.CompletedTask;
+            }
+
+            public UniTask StopAsync(CancellationToken cancellationToken)
+            {
+                StopStarted = true;
+                return ParkUntilReleasedAsync();
+            }
+
+            public UniTask SendAsync(
+                MessageId messageId,
+                object payload,
+                CancellationToken cancellationToken) => UniTask.CompletedTask;
+
+            public UniTask<TResponse> RequestAsync<TResponse>(
+                MessageId requestId,
+                object payload,
+                TimeSpan timeout,
+                CancellationToken cancellationToken) => UniTask.FromResult(default(TResponse));
+
+            public UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken) =>
+                UniTask.FromResult(TimeSpan.Zero);
+
+            public IDisposable Subscribe<TPayload>(
+                MessageId messageId, Action<TPayload> handler) => new NoSubscription();
+
+            public IDisposable SubscribeToFaults(Action<SessionFault> handler) =>
+                new NoSubscription();
+
+            public void Dispose()
+            {
+            }
+
+            public void ReleaseStop() => stop.TrySetResult();
+
+            /// <summary>Ends the stop by failing it, which is still ending it.</summary>
+            public void FailStop(Exception failure) => stop.TrySetException(failure);
+
+            // The state change follows the await, exactly as ProtocolSession's does:
+            // reaching Disconnected is the last thing a stop that yielded can do,
+            // and a double that did it first would make the ordering under test look
+            // satisfied by a stop that had not run.
+            private async UniTask ParkUntilReleasedAsync()
+            {
+                await stop.Task;
+                State = SessionState.Disconnected;
+            }
+
+            private sealed class NoSubscription : IDisposable
+            {
+                public void Dispose()
+                {
+                }
+            }
         }
 
         /// <summary>
