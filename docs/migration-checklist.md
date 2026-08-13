@@ -19,7 +19,12 @@ deliverable.
 - [x] Deterministic transport/content/Lua/time fakes.
 - [x] EditMode, PlayMode, static, local aggregate, and CI entry points.
 - [ ] Assign real CODEOWNERS teams in `.github/CODEOWNERS`.
-- [ ] Protect `main` with required architecture and Unity-test checks.
+- [ ] Protect `master` with required architecture and Unity-test checks. The trunk is
+  `master`, not `main`; the workflow's push trigger named `main` from the first commit
+  and therefore never fired once. Note the ordering this forces: the architecture check
+  can be made required as soon as it goes green, but the **Unity-test check cannot be
+  required until a self-hosted runner exists** — that job is manual-only today because
+  no runner is registered. See "CI boundary" in `docs/verification-matrix.md`.
 
 ## Phase 1 — production infrastructure
 

@@ -86,12 +86,14 @@ hand-built siblings green through both.
 ### The two runners are graded by one function, with one difference
 
 `run-unity-tests.ps1` has two paths — a connected Unity editor and a batchmode
-fallback — and CI takes the batch one (`-PreferConnectedEditor:$false`). The batch
-path used to verify nothing but the editor's exit code and the existence of the
-results XML, which it never opened. So none of the gate's real checks existed on
-the path CI actually runs: no empty-run guard, no accounting, no skip count, and
-no sanctioned-skip check — and CI is permanently in the skip state, which is the
-one state that check exists to police.
+fallback — and CI is configured to take the batch one
+(`-PreferConnectedEditor:$false`), though see **CI boundary**: that job has never
+actually run. The batch path used to verify nothing but the editor's exit code and
+the existence of the results XML, which it never opened. So none of the gate's real
+checks existed on the path CI is configured to run: no empty-run guard, no
+accounting, no skip count, and no sanctioned-skip check — and a machine with no
+endpoint is permanently in the skip state, which is the one state that check exists
+to police.
 
 Both paths now call the same `Assert-UnityTestRunPassed`, the batch path feeding it
 the NUnit XML reshaped into the connected producer's shape, and both write
@@ -118,8 +120,8 @@ count and the four counters are independent filters over those rows, so a row
 carrying a result string none of them recognises is counted by `total` alone.
 Measured: a results file holding `<test-case result="Warning"/>` arrives as
 `failed=0, inconclusive=0` and is caught only here —
-`EditMode did not account for every test: passed=1, skipped=0, total=2.` On the path
-CI actually takes it is the sole guard against an unrecognised result state.
+`EditMode did not account for every test: passed=1, skipped=0, total=2.` On the batch
+path it is the sole guard against an unrecognised result state.
 
 Everything else — empty run, named failures, the skip count in the log, and the
 sanctioned-skip check — grades identically on both paths.
@@ -209,7 +211,9 @@ continuation resumes on the main thread after
 during this iteration and both matter:
 
 - On the **batch path** it failed **deterministically**, three runs for three across
-  two commits — and the batch path is the only one CI takes.
+  two commits. The batch path is the one CI is configured to take — but those three
+  runs were local, and CI has never reached the Unity suite at all; see **CI
+  boundary**.
 - On the **connected** path it fails roughly **1 in 10**: one red in seven runs when
   it was first seen, and one red among eleven PlayMode attempts during the last
   implementation task — eight of those green and two aborted before they produced a
@@ -287,10 +291,51 @@ instance. Otherwise it uses hidden batchmode and writes NUnit XML.
 
 ## CI boundary
 
-The workflow uses a labeled self-hosted Windows runner so the exact licensed Unity
-editor revision is controlled. The sibling Go repository is not part of this
-checkout, so CI runs Unity Harness gates only; the aggregate local command also
-checks Go. Before production, pin third-party GitHub Actions to reviewed commit SHAs.
+**CI runs the architecture gate only. The Unity suite is a local gate, not a CI
+gate.** That is stated first because the version of this section that stood until
+now described an arrangement which had never once worked.
+
+`.github/workflows/unity-tests.yml` declares two jobs:
+
+- **`architecture`** runs `verify-architecture.ps1` on GitHub's hosted
+  `windows-latest`. It needs no runner registration, no Unity licence and no
+  secrets, and it is the only check a pull request receives.
+- **`unity-tests`** runs EditMode and PlayMode on the batch path
+  (`-PreferConnectedEditor:$false`) and requires a runner labelled
+  `[self-hosted, Windows, unity-6000.2.7f2]`, so that the exact licensed editor
+  revision is controlled. **No such runner is registered on this repository.** The
+  job is therefore gated behind `workflow_dispatch` and does not run on pull
+  requests. To promote it back into the gate, register a runner carrying those three
+  labels and delete the `if:`.
+
+Before production, pin third-party GitHub Actions to reviewed commit SHAs.
+
+### What was measured, and why this section was rewritten
+
+Every pull request this repository has ever opened — three, across three iterations —
+failed `architecture` in 12 to 16 seconds, and `unity-tests` was skipped behind
+`needs: architecture` every time. **The Unity suite has never executed in CI.** Pull
+request #3 was merged with that check red.
+
+The cause was one line, and it is worth naming precisely because the *intent* was
+correct throughout. `verify-architecture.ps1` composed the Go source path with
+`Join-Path`, which resolves the drive qualifier and throws `Cannot find drive` under
+`$ErrorActionPreference = 'Stop'` when handed the developer default on a runner that
+has no `E:`. That threw **before** the `Test-Path` skip described below could be
+reached — so the graceful skip this section documents was unreachable in exactly the
+environment it was written for. The path is composed with
+`[System.IO.Path]::Combine` now, which performs no drive resolution. Both directions
+were re-measured after the change: a non-existent drive warns and exits 0, and a real
+Go checkout still runs the byte comparison over all 39 messages.
+
+Two further consequences are recorded because they outlived their cause:
+
+- The `push` trigger named `main` while the default branch is `master`, so no push to
+  the trunk ever triggered the workflow either. Only `pull_request` ran anything.
+- **Every figure quoted in this document, and every figure in the iteration ledgers,
+  comes from a local run** — a connected editor for most of them. None was produced by
+  CI. Where this document says CI "takes" the batch path, read that as *is configured
+  to take*, not *has run*.
 
 The protocol drift gate inherits that boundary. `verify-architecture.ps1` looks for
 `internal/protocol` under `-GoServerRoot` (default

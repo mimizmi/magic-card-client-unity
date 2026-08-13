@@ -394,13 +394,23 @@ foreach ($Package in $ExpectedNuGet.GetEnumerator()) {
 # The go TOOLCHAIN is guarded the same way, and for the same promise. With
 # $ErrorActionPreference = 'Stop' a missing `go` makes the invocation below throw
 # CommandNotFoundException -- an error that names neither this gate nor its
-# optional dependency. CI runs this script with no -GoServerRoot, so it resolves
-# the default path on a self-hosted Windows runner where the toolchain may be
-# absent even though the source is present. Both skips are warnings; when the
-# source AND the toolchain are both present the gate stays strict and real drift
-# still fails the build.
+# optional dependency. Both skips are warnings; when the source AND the toolchain
+# are both present the gate stays strict and real drift still fails the build.
+#
+# The source path is composed with [System.IO.Path]::Combine rather than
+# Join-Path, and that is load-bearing rather than stylistic. CI runs this script
+# with no -GoServerRoot, so it resolves the developer default declared at the top
+# of this file -- a path on a drive the runner does not have. Join-Path RESOLVES
+# the drive qualifier and throws "Cannot find drive" under
+# $ErrorActionPreference = 'Stop', which fired BEFORE the Test-Path skip below
+# could ever be reached, so the skip this gate documents was unreachable in
+# exactly the environment it was written for. That is measured, not hypothetical:
+# it failed the architecture job on every pull request from the first commit
+# until this line changed, and because unity-tests declares `needs: architecture`,
+# the Unity suite never ran in CI once. Combine performs no drive resolution, so
+# a path on a non-existent drive composes fine and the skip below does its job.
 $FixturePath = Join-Path $ProjectRoot 'Packages\com.echo.harness\Fixtures\protocol.contract.json'
-$GoProtocolSource = Join-Path $GoServerRoot 'internal\protocol'
+$GoProtocolSource = [System.IO.Path]::Combine($GoServerRoot, 'internal\protocol')
 $GoToolchain = Get-Command -Name 'go' -CommandType Application -ErrorAction SilentlyContinue
 if (-not (Test-Path -LiteralPath $GoProtocolSource -PathType Container)) {
     Write-Warning "Go protocol source not found at $GoProtocolSource; skipping the protocol fixture drift gate."

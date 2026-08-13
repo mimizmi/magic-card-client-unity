@@ -4,7 +4,11 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      # The default branch is master. This said `main` from the first commit, so
+      # no push to the trunk has ever triggered this workflow; only pull_request
+      # did any work at all.
+      - master
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,8 +28,23 @@ jobs:
         shell: pwsh
         run: ./Tools/ci/verify-architecture.ps1
 
+  # Opt-in, and deliberately NOT part of the pull-request gate.
+  #
+  # This job needs a runner labelled [self-hosted, Windows, unity-6000.2.7f2]. No
+  # such runner is registered on this repository -- the runner count is zero -- so
+  # from the first commit until this comment it could never start. It sat
+  # permanently "skipped" behind a failing `needs: architecture`, and a skipped
+  # check reads on a pull request very much like one that ran and passed. Making
+  # it manual-only is the honest state: the checks list no longer implies a Unity
+  # suite that CI has never once executed.
+  #
+  # docs/verification-matrix.md is the authority on what that costs -- the Unity
+  # suite is a LOCAL gate, not a CI gate. To promote it back to a CI gate, register
+  # a runner carrying those three labels and delete the `if:` below; nothing else
+  # here needs to change.
   unity-tests:
     needs: architecture
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Windows, unity-6000.2.7f2]
     timeout-minutes: 20
     steps:
