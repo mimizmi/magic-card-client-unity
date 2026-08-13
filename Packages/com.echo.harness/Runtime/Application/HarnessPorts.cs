@@ -43,6 +43,25 @@ namespace Echo.Harness.Application
         /// </summary>
         UniTask SendAsync(TransportMessage message, CancellationToken cancellationToken);
 
+        /// <summary>
+        /// <b>Cancelling a receive means abandoning the link.</b> Implementations
+        /// close the connection on any cancellation of this token, because closing
+        /// the socket is the only way this runtime can unpark a blocked read. That
+        /// is the contract rather than an implementation accident: a caller must
+        /// not cancel a receive to pause reading, to apply backpressure, or to
+        /// impose a per-message deadline, because all three destroy the transport
+        /// as a side effect.
+        ///
+        /// <para>ProtocolSession honours this today, and the reason is worth
+        /// stating precisely, because it is not one choke point. The token it
+        /// passes comes from a source linked to the one handed to StartAsync, so a
+        /// receive is cancelled either by CancelPump or by the caller cancelling
+        /// the whole session - and both of those are teardown. What there is no
+        /// path for is cancelling a receive while meaning to keep using the link.
+        /// That is correct partly by luck: the session has so far had no reason to
+        /// want one. The constraint is written here rather than left to be
+        /// rediscovered by whoever first has that reason.</para>
+        /// </summary>
         UniTask<TransportMessage> ReceiveAsync(CancellationToken cancellationToken);
 
         UniTask DisconnectAsync(CancellationToken cancellationToken);
@@ -77,43 +96,59 @@ namespace Echo.Harness.Application
         UniTask ShutdownAsync(CancellationToken cancellationToken);
     }
 
+    /// <summary>
+    /// Wall-clock time, for stamping a moment that leaves the process - a wire
+    /// timestamp the server echoes, a log line, a display.
+    ///
+    /// <para><b>Do not measure an interval with this.</b> Wall time can step in
+    /// either direction under a clock synchronisation or a manual change, so a
+    /// difference between two reads is not a duration. <see cref="IElapsedTime"/>
+    /// is the port for that.</para>
+    ///
+    /// <para>Nothing here does any more, and the two sites that used to are worth
+    /// keeping on the page, because what each of them would have cost is the
+    /// argument against ever routing a duration back through this port.
+    /// SendBudget.TryConsume refills only once the measured interval reaches a
+    /// whole refill interval, and a negative interval never reaches one: on a
+    /// backwards step the drained bucket would wedge at zero and refuse every
+    /// send until the wall clock passed where it had already been. The round-trip
+    /// probe returned <c>clock.UtcNow - sentAt</c>, and the end-to-end tier
+    /// asserts that latency is greater than zero, so a step landing inside a probe
+    /// would fail that assertion with a negative number and nothing to say where
+    /// it came from. Both now measure with <see cref="IElapsedTime"/>, which
+    /// cannot produce either failure. The one consumer left is that same probe,
+    /// and it reads this port for one thing only: stamping the ts the server
+    /// echoes back.</para>
+    ///
+    /// <para>Splitting the port is also what put a wall clock within reach of a
+    /// player build, which is why the rule above is a rule rather than a note.
+    /// Before the split every wall clock lived in TestKit, behind
+    /// defineConstraints <c>["UNITY_INCLUDE_TESTS"]</c>, and could not ship; a
+    /// DateTimeOffset.UtcNow-backed <c>SystemClock</c> now sits in Infrastructure
+    /// under no define constraint at all. The reach is permanent and the misuse is
+    /// not: what keeps it harmless is that a consumer needing a duration asks
+    /// <see cref="IElapsedTime"/>, which cannot answer what time it is.</para>
+    /// </summary>
     public interface IClock
     {
-        /// <summary>
-        /// Must be usable for measuring an interval, not only for stamping a moment.
-        /// A round-trip probe returns the difference between two reads of this
-        /// property, so an implementation whose value can step backwards reports a
-        /// negative latency, and one that can step forwards reports a 30 s round trip
-        /// on a healthy link.
-        ///
-        /// <para><b>A live risk, not a theoretical one - and it stopped being
-        /// theoretical without this comment noticing.</b> It used to say the only
-        /// implementation was monotonic by construction, so no test could catch a
-        /// replacement that was not. That was true of ManualClock, whose Advance
-        /// rejects a negative duration. It has been false since SystemClock arrived:
-        /// that one returns DateTimeOffset.UtcNow, which a clock synchronisation or
-        /// a manual change can step in either direction, and both of the paths below
-        /// now run on it.</para>
-        ///
-        /// <para>What a backwards step costs today. SendBudget.TryConsume computes
-        /// <c>(clock.UtcNow - lastFill).Ticks</c> and refills only when that reaches
-        /// a whole interval; a negative elapsed never does, so once the bucket has
-        /// drained the budget wedges at zero and every send is refused until the wall
-        /// clock passes where it had already been. And ProbeRoundTripAsync returns
-        /// <c>clock.UtcNow - sentAt</c>, which the end-to-end tier asserts is greater
-        /// than zero - so a step landing inside a probe fails that test with a
-        /// negative latency and nothing to say where the number came from.</para>
-        ///
-        /// <para>No test can RELIABLY catch a non-monotonic implementation, because
-        /// the requirement is on the implementation rather than on any call site.
-        /// The end-to-end assertion named above is the whole of what exists, and it
-        /// only fires when a step happens to land inside the probe's own few
-        /// milliseconds - so it is non-deterministic, and when it does fire it
-        /// reports a negative latency rather than a clock that moved. That is why
-        /// the requirement is stated here, and why a new IClock is the wrong place
-        /// to be clever.</para>
-        /// </summary>
         DateTimeOffset UtcNow { get; }
+    }
+
+    /// <summary>
+    /// Monotonic elapsed time, and only that. It cannot answer "what time is it",
+    /// which is the point: a consumer that only needs a duration should be unable
+    /// to reach a wall clock by accident.
+    ///
+    /// <para><see cref="GetTimestamp"/> returns an opaque counter whose unit is an
+    /// implementation detail; only <see cref="GetElapsedTime"/> may interpret it.
+    /// Implementations must never report a negative interval for a timestamp taken
+    /// earlier.</para>
+    /// </summary>
+    public interface IElapsedTime
+    {
+        long GetTimestamp();
+
+        TimeSpan GetElapsedTime(long startingTimestamp);
     }
 
     /// <summary>

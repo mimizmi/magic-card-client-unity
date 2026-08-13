@@ -4,11 +4,13 @@ using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
+using Echo.Harness.Bootstrap;
 using Echo.Harness.Contracts;
 using Echo.Harness.Infrastructure;
 using Echo.Harness.TestKit;
 using NUnit.Framework;
 using UnityEngine.TestTools;
+using VContainer;
 
 namespace Echo.Harness.Tests.EditMode
 {
@@ -19,11 +21,19 @@ namespace Echo.Harness.Tests.EditMode
     /// repository that can disagree with us.
     ///
     /// <para>The server is remote and always on, so nothing here starts, stops, or
-    /// waits for one. The endpoint comes from ECHO_SERVER_HOST and, optionally,
-    /// ECHO_SERVER_PORT, and it is deliberately not committed anywhere: it is a
-    /// developer endpoint, and a variable with no default is what keeps it out of
-    /// the tree. A machine that has not set it skips this class, which the test
-    /// gate tolerates for this class alone - see run-unity-tests.ps1.</para>
+    /// waits for one. The endpoint comes from the HarnessEndpointSettings asset
+    /// first and ECHO_SERVER_HOST (plus optional ECHO_SERVER_PORT) second, which is
+    /// the same chain the bootstrap scene resolves through; neither is committed,
+    /// because it is a developer endpoint and a source with no default is what
+    /// keeps it out of the tree. A machine with neither skips this class, which the
+    /// test gate tolerates for this class alone - see run-unity-tests.ps1.</para>
+    ///
+    /// <para>The asset is listed first because on this project it is usually the
+    /// only one that works. An editor inherits its environment from whatever
+    /// launched it - normally Unity Hub, which is long-running - so a variable set
+    /// after the Hub started is invisible to the editor no matter how many times
+    /// the editor itself is restarted. Measured: with the variable set and the
+    /// asset absent this tier skipped; with the asset present it ran.</para>
     ///
     /// <para>[UnityTest] rather than [Test], for the reason spelled out at
     /// TcpTransportFramingTests: a real socket completes on the thread pool and
@@ -60,9 +70,17 @@ namespace Echo.Harness.Tests.EditMode
         /// </summary>
         private static readonly TimeSpan OneHeartbeatInterval = TimeSpan.FromSeconds(25);
 
+        /// <summary>
+        /// Names both doors, in the order they are tried. The asset is listed first
+        /// and deliberately: it is the one that works on a machine where the editor
+        /// was launched before the variable was set, which is the ordinary case
+        /// rather than an edge one.
+        /// </summary>
         private static readonly string SkipReason =
             "No server endpoint is configured, so the end-to-end tier did not run. " +
-            $"Set {RemoteServerEndpoint.HostVariable} to enable it " +
+            $"Create an {HarnessEndpointSettings.ResourcePath} asset under a Resources " +
+            "folder (Assets > Create > Echo > Harness Endpoint Settings) and set its " +
+            $"host, or set {RemoteServerEndpoint.HostVariable} before the editor starts " +
             $"({RemoteServerEndpoint.PortVariable} is optional and defaults to " +
             $"{RemoteServerEndpoint.DefaultPort}).";
 
@@ -195,14 +213,72 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         /// <summary>
+        /// The only test in the repository that can fail because the WIRING is wrong
+        /// rather than because the protocol is. Every other case in this fixture
+        /// constructs its transport, session, clock and scheduler by hand, so all of
+        /// them would keep passing with the composition root emptied out; this one
+        /// resolves the session from <c>HarnessComposition</c> and then makes it talk
+        /// to the real server.
+        ///
+        /// <para>Measured rather than claimed: with
+        /// <c>builder.Register&lt;ProtocolSession&gt;(...).As&lt;IProtocolSession&gt;()</c>
+        /// deleted from <c>Configure</c>, this test failed at <c>Resolve</c> and the
+        /// three tests above it passed unchanged.</para>
+        ///
+        /// <para>What it does NOT resolve is the entry point. <c>HarnessLifetimeScope</c>
+        /// registers <c>HarnessSessionDriver</c> on top of <c>Configure</c>, and that
+        /// half is a <c>LifetimeScope</c>'s and belongs to the PlayMode driver tests.
+        /// This is the registration half, exercised against a live socket.</para>
+        /// </summary>
+        [UnityTest]
+        public IEnumerator TheComposedGraphConnectsAndProbes()
+        {
+            var endpoint = RequireEndpoint();
+            return UniTask.ToCoroutine(async () =>
+            {
+                var builder = new ContainerBuilder();
+                HarnessComposition.Configure(
+                    builder,
+                    EndpointResolution.From(endpoint.Host, endpoint.Port, "the end-to-end tier"));
+
+                using var container = builder.Build();
+                var session = container.Resolve<IProtocolSession>();
+
+                await session.StartAsync(CancellationToken.None);
+                Assert.That(session.State, Is.EqualTo(SessionState.Connected),
+                    "The graph the bootstrap scene builds reached the real server.");
+
+                var latency = await session.ProbeRoundTripAsync(CancellationToken.None);
+                Assert.That(latency, Is.GreaterThan(TimeSpan.Zero),
+                    "A resolved session that connects but cannot round-trip would " +
+                    "mean the graph is wired to something other than the endpoint " +
+                    "it was configured with.");
+
+                await session.StopAsync(CancellationToken.None);
+                Assert.That(session.State, Is.EqualTo(SessionState.Disconnected));
+            });
+        }
+
+        /// <summary>
         /// Resolved before the coroutine is built rather than inside it. Assert.Ignore
         /// throws, and throwing from the test method itself is the shape the Unity
         /// runner handles cleanly; thrown from inside UniTask.ToCoroutine it would
         /// have to survive being captured into a task and rethrown from MoveNext.
         /// </summary>
-        private static RemoteServerEndpoint RequireEndpoint()
+        /// <para>Resolved through <see cref="HarnessEndpointSettings.ResolveFromResources"/>
+        /// rather than <c>RemoteServerEndpoint.TryResolve</c>, which reads the
+        /// environment and nothing else. The two doors had drifted: the bootstrap
+        /// scene accepted an asset or a variable while this tier accepted only a
+        /// variable, and the asset exists precisely so an endpoint can be set
+        /// without restarting the editor. That is not a convenience here. An editor
+        /// inherits its environment block from whatever launched it - normally Unity
+        /// Hub, itself long-running - so a variable set after the Hub started reaches
+        /// neither, and this tier stays skipped however many times the editor is
+        /// restarted. That was measured rather than supposed.</para>
+        private static EndpointResolution RequireEndpoint()
         {
-            if (!RemoteServerEndpoint.TryResolve(out var endpoint))
+            var endpoint = HarnessEndpointSettings.ResolveFromResources();
+            if (!endpoint.IsConfigured)
             {
                 Assert.Ignore(SkipReason);
             }
@@ -216,19 +292,25 @@ namespace Echo.Harness.Tests.EditMode
         /// failure rather than a not-yet.
         /// </summary>
         private static async UniTask<(CountingTransport Transport, ProtocolSession Session)>
-            StartSessionAsync(RemoteServerEndpoint endpoint)
+            StartSessionAsync(EndpointResolution endpoint)
         {
             var transport = new CountingTransport(new TcpTransport(
                 new TcpTransportOptions { Host = endpoint.Host, Port = endpoint.Port },
-                new SystemClock()));
+                new StopwatchElapsedTime()));
             ProtocolSession session = null;
             try
             {
                 // RecordingSessionScheduler, because these are EditMode tests with
                 // no player loop to switch to. That is the reason the scheduler port
                 // exists at all, and MainThreadSessionScheduler is PlayMode's.
+                // Two implementations, not one object passed twice: the wall clock
+                // stamps the ping's wire ts and the stopwatch measures the round
+                // trip, and a wall clock cannot serve as an elapsed-time source.
                 session = new ProtocolSession(
-                    transport, new SystemClock(), new RecordingSessionScheduler());
+                    transport,
+                    new SystemClock(),
+                    new StopwatchElapsedTime(),
+                    new RecordingSessionScheduler());
                 await session.StartAsync(CancellationToken.None);
             }
             catch (Exception)

@@ -261,13 +261,34 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         [Test]
-        public void ManualClock_AdvancesWithoutWallClockTime()
+        public void ManualTime_AdvancesWithoutWallClockTime()
         {
-            var clock = new ManualClock(DateTimeOffset.UnixEpoch);
+            var clock = new ManualTime(DateTimeOffset.UnixEpoch);
 
             clock.Advance(TimeSpan.FromSeconds(5));
 
             Assert.That(clock.UtcNow, Is.EqualTo(DateTimeOffset.UnixEpoch.AddSeconds(5)));
+        }
+
+        [Test]
+        public void ManualTime_AdvancesBothFacesTogether()
+        {
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            var start = time.GetTimestamp();
+
+            time.Advance(TimeSpan.FromSeconds(5));
+
+            Assert.That(time.UtcNow, Is.EqualTo(DateTimeOffset.UnixEpoch.AddSeconds(5)));
+            Assert.That(time.GetElapsedTime(start), Is.EqualTo(TimeSpan.FromSeconds(5)));
+        }
+
+        [Test]
+        public void ManualTime_RefusesToMoveBackwards()
+        {
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => time.Advance(TimeSpan.FromSeconds(-1)));
         }
     }
 }

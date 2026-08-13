@@ -33,7 +33,7 @@ namespace Echo.Harness.Tests.EditMode
         {
             var transport = new TcpTransport(
                 new TcpTransportOptions { Host = "127.0.0.1", Port = server.Port },
-                new ManualClock(DateTimeOffset.UnixEpoch));
+                new ManualTime(DateTimeOffset.UnixEpoch));
             try
             {
                 var connecting = transport.ConnectAsync(CancellationToken.None);
@@ -259,7 +259,7 @@ namespace Echo.Harness.Tests.EditMode
 
                 using var transport = new TcpTransport(
                     new TcpTransportOptions { Host = "127.0.0.1", Port = deadPort },
-                    new ManualClock(DateTimeOffset.UnixEpoch));
+                    new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var failure = await CaptureAsync(async () =>
                     await transport.ConnectAsync(CancellationToken.None).Timeout(Patience));
@@ -275,7 +275,7 @@ namespace Echo.Harness.Tests.EditMode
                 using var server = new LoopbackProtocolServer();
                 using var transport = new TcpTransport(
                     new TcpTransportOptions { Host = "127.0.0.1", Port = server.Port },
-                    new ManualClock(DateTimeOffset.UnixEpoch));
+                    new ManualTime(DateTimeOffset.UnixEpoch));
 
                 using var cancellation = new CancellationTokenSource();
                 cancellation.Cancel();

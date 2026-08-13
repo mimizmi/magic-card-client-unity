@@ -2,6 +2,7 @@
   "name": "Echo.Harness.Tests.PlayMode",
   "rootNamespace": "Echo.Harness.Tests.PlayMode",
   "references": [
+    "Echo.Harness.Contracts",
     "Echo.Harness.Application",
     "Echo.Harness.Infrastructure",
     "Echo.Harness.Presentation",

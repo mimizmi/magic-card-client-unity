@@ -18,8 +18,8 @@ namespace Echo.Harness.Tests.EditMode
         {
             transport = new FakeTransport();
             scheduler = new RecordingSessionScheduler();
-            return new ProtocolSession(
-                transport, new ManualClock(DateTimeOffset.UnixEpoch), scheduler);
+            var time = new ManualTime(DateTimeOffset.UnixEpoch);
+            return new ProtocolSession(transport, time, time, scheduler);
         }
 
         [Test]

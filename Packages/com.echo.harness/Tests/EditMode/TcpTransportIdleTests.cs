@@ -21,8 +21,8 @@ namespace Echo.Harness.Tests.EditMode
     /// completed, UniTask only allow to use await." before any assertion is reached,
     /// and stops the very loop that would let the operation finish.
     ///
-    /// The timeouts here are real wall-clock milliseconds rather than a ManualClock
-    /// tick, because the idle deadline is not driven by the injected IClock and
+    /// The timeouts here are real wall-clock milliseconds rather than a ManualTime
+    /// tick, because the idle deadline is not driven by the injected IElapsedTime and
     /// cannot be: see the comment on the deadline in TcpTransport.ReceiveAsync.
     /// </summary>
     public sealed class TcpTransportIdleTests
@@ -40,7 +40,7 @@ namespace Echo.Harness.Tests.EditMode
                     Port = server.Port,
                     ReadIdleTimeout = idle
                 },
-                new ManualClock(DateTimeOffset.UnixEpoch));
+                new ManualTime(DateTimeOffset.UnixEpoch));
             try
             {
                 var connecting = transport.ConnectAsync(CancellationToken.None);
@@ -265,14 +265,14 @@ namespace Echo.Harness.Tests.EditMode
         {
             var zero = Assert.Throws<ArgumentOutOfRangeException>(() => new TcpTransport(
                 new TcpTransportOptions { ReadIdleTimeout = TimeSpan.Zero },
-                new ManualClock(DateTimeOffset.UnixEpoch)));
+                new ManualTime(DateTimeOffset.UnixEpoch)));
             Assert.That(zero.Message, Does.Contain("ReadIdleTimeout"),
                 "The message has to name the option, which is the whole reason the " +
                 "guard is here rather than at the first receive.");
 
             Assert.Throws<ArgumentOutOfRangeException>(() => new TcpTransport(
                 new TcpTransportOptions { ReadIdleTimeout = TimeSpan.FromSeconds(-1) },
-                new ManualClock(DateTimeOffset.UnixEpoch)));
+                new ManualTime(DateTimeOffset.UnixEpoch)));
         }
 
         /// <summary>

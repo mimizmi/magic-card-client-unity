@@ -125,3 +125,26 @@ Desktop.ini
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
 /Assets/Resources/Art
 /Assets/Art
+
+# The developer's server endpoint. The address must not enter the repository -
+# see ServerEndpoint for why ECHO_SERVER_HOST has no default. This asset is the
+# local, editable half of the same rule.
+#
+# Unqualified on purpose. Unity merges every folder named Resources under
+# Assets/ and inside packages, and Resources.Load finds the asset in all of
+# them, so an asset at Assets/Game/Resources/ would load correctly. A rule
+# anchored to /Assets/Resources/ would cover only the one location the docs
+# happen to name, and nothing else in this repository scans for addresses -
+# this line is the whole control.
+**/HarnessEndpointSettings.asset
+**/HarnessEndpointSettings.asset.meta
+
+# The folder Unity creates to hold that asset, and only that one - anchored,
+# unlike the two lines above, because this excuses a specific folder rather than
+# a file wherever it lands. Assets/Resources/ exists in this repository solely to
+# hold the ignored asset, so it is empty in every fresh clone; git cannot store an
+# empty directory, and a committed Resources.meta with no folder beside it is an
+# orphan Unity deletes on import, handing every clone a spurious deletion.
+# A Resources folder that ever holds committed content should have its meta
+# committed - remove this line then, rather than working around it.
+/Assets/Resources.meta

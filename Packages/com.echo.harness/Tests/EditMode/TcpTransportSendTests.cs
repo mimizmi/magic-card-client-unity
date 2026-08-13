@@ -56,7 +56,7 @@ namespace Echo.Harness.Tests.EditMode
 
         private static async UniTask<TcpTransport> ConnectAsync(
             LoopbackProtocolServer server,
-            ManualClock clock,
+            ManualTime clock,
             int budgetPerSecond = 30)
         {
             var transport = new TcpTransport(
@@ -91,7 +91,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch), budgetPerSecond: 100);
+                    server, new ManualTime(DateTimeOffset.UnixEpoch), budgetPerSecond: 100);
 
                 // Several callers plus a heartbeat reply, all in flight together.
                 // This is the shape a real session produces: it answers Ping from
@@ -154,7 +154,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var body = Encoding.UTF8.GetBytes("{\"phase\":\"action\"}");
                 for (var i = 0; i < 30; i++)
@@ -184,7 +184,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var body = Encoding.UTF8.GetBytes("{\"phase\":\"action\"}");
                 for (var i = 0; i < 30; i++)
@@ -226,7 +226,7 @@ namespace Echo.Harness.Tests.EditMode
             {
                 using var server = new LoopbackProtocolServer();
                 using var transport = await ConnectAsync(
-                    server, new ManualClock(DateTimeOffset.UnixEpoch));
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
 
                 var tooBig = new byte[WireFrameSpec.MaxPayloadBytes + 1];
 
@@ -237,6 +237,130 @@ namespace Echo.Harness.Tests.EditMode
                 Assert.That(failure, Is.InstanceOf<ArgumentOutOfRangeException>());
                 Assert.That(transport.State, Is.EqualTo(TransportState.Connected));
             });
+        }
+
+        /// <summary>
+        /// A send issued from a thread with no SynchronizationContext must fail or
+        /// succeed on transport grounds, never on scheduler bookkeeping.
+        ///
+        /// The transport is genuinely connected first, and that is the whole
+        /// difference between this test and a test that proves nothing. SendAsync
+        /// runs ThrowIfDisposed and EnsureConnected before it reaches the gate, so a
+        /// transport that was never connected throws on the second of those and the
+        /// AsUniTask under test is never evaluated at all.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator ASendFromAThreadWithNoSynchronizationContextReachesTheGate()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = await ConnectAsync(
+                    server, new ManualTime(DateTimeOffset.UnixEpoch));
+
+                var thrown = await OffContextAsync(() => transport.SendAsync(
+                    new TransportMessage(MessageId.Pong, new byte[0]),
+                    CancellationToken.None));
+
+                TestContext.WriteLine(
+                    "PROBE send threw: " + (thrown == null ? "<null>" : thrown.GetType().FullName)
+                    + " | message: " + (thrown == null ? "<null>" : thrown.Message));
+
+                Assert.That(thrown, Is.Null,
+                    "A send from a context-less thread must not fail on scheduler "
+                    + "capture. Anything at all here is that failure or a regression "
+                    + "in the send itself.");
+
+                // The frame has to have reached the wire. Without this the test
+                // would still pass if SendAsync returned early having written
+                // nothing.
+                await server.WaitForFramesAsync(1, Patience);
+            });
+        }
+
+        /// <summary>
+        /// The same defect on the connect path. ConnectAsync's first await is the
+        /// only thing between the caller and a usable transport, so a context-less
+        /// thread cannot open a link at all while it captures the caller's
+        /// scheduler.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator AConnectFromAThreadWithNoSynchronizationContextCompletes()
+        {
+            return UniTask.ToCoroutine(async () =>
+            {
+                using var server = new LoopbackProtocolServer();
+                using var transport = new TcpTransport(
+                    new TcpTransportOptions { Host = "127.0.0.1", Port = server.Port },
+                    new ManualTime(DateTimeOffset.UnixEpoch));
+
+                // The connect is observed before the accept, not after. The listener
+                // is already started, so the handshake completes into its backlog
+                // with no AcceptAsync outstanding - and a connect that fails on
+                // scheduler capture disposes its socket on the way out, so an accept
+                // waited on first would report a five second timeout instead of the
+                // exception that caused it.
+                var thrown = await OffContextAsync(
+                    () => transport.ConnectAsync(CancellationToken.None));
+
+                TestContext.WriteLine(
+                    "PROBE connect threw: " + (thrown == null ? "<null>" : thrown.GetType().FullName)
+                    + " | message: " + (thrown == null ? "<null>" : thrown.Message));
+
+                Assert.That(thrown, Is.Null,
+                    "A connect from a context-less thread must not fail on scheduler "
+                    + "capture.");
+                Assert.That(transport.State, Is.EqualTo(TransportState.Connected));
+
+                // The link is real, not merely reported so.
+                await server.AcceptAsync(Patience);
+            });
+        }
+
+        /// <summary>
+        /// Runs one transport operation on a thread pool thread - which has no
+        /// SynchronizationContext - and hands back whatever it threw, or null.
+        ///
+        /// Completion is polled on the editor loop rather than bridged back with
+        /// Task.AsUniTask, and that is deliberate: that bridge is the exact
+        /// mechanism these tests measure, so using it here would make the harness
+        /// behave differently before and after the change it exists to detect. The
+        /// poll also guarantees the caller resumes on the main thread whatever the
+        /// operation did with its own continuation.
+        /// </summary>
+        private static async UniTask<Exception> OffContextAsync(Func<UniTask> operation)
+        {
+            var work = System.Threading.Tasks.Task.Run(async () =>
+            {
+                Assert.That(
+                    SynchronizationContext.Current,
+                    Is.Null,
+                    "the premise of these tests is a thread with no context");
+
+                try
+                {
+                    await operation();
+                    return (Exception)null;
+                }
+                catch (Exception failure)
+                {
+                    return failure;
+                }
+            });
+
+            var deadline = DateTime.UtcNow + Patience;
+            while (!work.IsCompleted)
+            {
+                if (DateTime.UtcNow > deadline)
+                {
+                    throw new TimeoutException(
+                        $"The off-context operation did not finish within {Patience}.");
+                }
+
+                await UniTask.Delay(TimeSpan.FromMilliseconds(25), DelayType.Realtime);
+            }
+
+            return work.GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -403,7 +527,7 @@ namespace Echo.Harness.Tests.EditMode
                     // allowance.
                     SendBudgetPerSecond = SendsBeforeGivingUpOnParking + 8
                 },
-                new ManualClock(DateTimeOffset.UnixEpoch));
+                new ManualTime(DateTimeOffset.UnixEpoch));
             try
             {
                 var connecting = transport.ConnectAsync(CancellationToken.None);

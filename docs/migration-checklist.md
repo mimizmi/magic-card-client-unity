@@ -108,43 +108,84 @@ deliverable.
   volume. It replaced a silent drop, which is strictly better, but every event that
   arrives before its UI subscriber now publishes one; the first Phase 2 view will
   show whether that reads as signal or noise.
-- [ ] Give the session stack a production wiring, and note that this is larger than
-  a DI registration. `HarnessComposition` registers only `HarnessRuntimeDescriptor`,
-  so nothing constructs `MainThreadSessionScheduler` — but the blocker underneath is
-  that **there is no production `IClock` at all**. Both implementations live in
-  `Echo.Harness.TestKit`, which carries `"defineConstraints": ["UNITY_INCLUDE_TESTS"]`,
-  and `TcpTransport` and `ProtocolSession` both require one in their constructors. As
-  it stands the transport, the session, the scheduler and the send budget cannot be
-  constructed in a player build. A shippable clock has to land before, or with, the
-  lifetime scopes.
-- [ ] Decide what a caller cancelling one receive should mean. `TcpTransport.ReceiveAsync`
-  closes the link on **any** cancellation of its token, not only on the idle deadline —
-  the socket close is what unparks a read this runtime cannot otherwise interrupt. A
-  consequence is that cancelling the token handed to `ProtocolSession.StartAsync`
-  destroys the transport as a side effect of asking the session to stop reading. That is
-  fine for shutdown and wrong for anything finer; whoever wires the pump needs a
-  separate mechanism rather than a tweak to `AbandonTheLink`.
-- [ ] Handle the scheduler's real failure mode, which is a stall rather than a throw.
-  `UniTask.SwitchToMainThread` queues its continuation on the player loop without
-  consulting the token, so when the loop stops — application quit, domain reload, or
-  leaving play mode — a pending hop never resumes and never throws. `ProtocolSession`
-  treats a failing hop as a fault it can publish; it has no answer for one that simply
-  never returns, and `Dispose`/`CancelPump` cannot free it.
-- [ ] Revisit the request-timeout hop's non-cancellation failure path. Carried from the
-  session-layer iteration and not closed there: if the teardown hop fails for a reason
-  other than cancellation, the `finally` still un-registers the gate entry while running
-  off-context, and no `SessionFault` is published. The exception the caller receives is
-  now correct; the bookkeeping is still unreported.
-- [ ] Guard `SendAsync` against a caller with no `SynchronizationContext`.
-  `Task.AsUniTask()` calls `TaskScheduler.FromCurrentSynchronizationContext()` eagerly,
-  so a send issued from a `Task.Run` or a thread-pool callback throws
-  `InvalidOperationException` before the write gate is even taken. Masked today only
-  because the Unity main thread always has a context.
+- [x] Give the session stack a production wiring. Two claims this item used to carry
+  were already stale by the time Task 8 read it, and they are recorded rather than
+  quietly deleted. It said "there is no production `IClock` at all. Both
+  implementations live in `Echo.Harness.TestKit`" — that stopped being true when
+  `SystemClock` and `StopwatchElapsedTime` landed in
+  `Echo.Harness.Infrastructure/SystemTime.cs`, whose asmdef carries
+  `"defineConstraints": []` and therefore ships in a player. And it said "nothing
+  constructs `MainThreadSessionScheduler`" — `HarnessComposition.Configure` now
+  registers it as `ISessionScheduler` alongside `SystemClock`, `StopwatchElapsedTime`,
+  `TcpTransportOptions`, `TcpTransport` and `ProtocolSession`, the last two as
+  singletons, plus the resolved `EndpointResolution`. **Registering is not resolving**,
+  and that half is now closed too, which is what finished this item: `HarnessLifetimeScope`
+  in the committed `Assets/Scenes/Bootstrap.unity` calls `Configure` and registers
+  `HarnessSessionDriver` as an entry point, so entering play mode resolves the graph,
+  starts the session when an endpoint is configured, and stops it on both measured
+  shutdown paths — see the note on
+  `ProtocolSession.SwitchToSessionContextForTeardownAsync` for what a driver owes the
+  session on the way out, and `HarnessSessionDriverTests` for the six properties that
+  hold it in place. One end-to-end test now resolves that same graph and drives it
+  against the real server; it skips wherever no endpoint is configured, CI included.
+- [x] Decide what a caller cancelling one receive should mean. Decided as a contract
+  rather than changed as behaviour, and written on `ITransport.ReceiveAsync` where a
+  caller will meet it: **cancelling a receive means abandoning the link.** The socket
+  close is the only thing that unparks a blocked read on this runtime, so a caller must
+  not cancel a receive to pause reading, to apply backpressure, or to impose a
+  per-message deadline — all three destroy the transport as a side effect. The session
+  honours it because every token that can cancel a receive comes from teardown; what
+  there is no path for is cancelling a receive while meaning to keep using the link, and
+  the constraint is recorded rather than left for whoever first wants one to rediscover.
+- [x] Handle the scheduler's real failure mode, which is a stall rather than a throw.
+  Closed by a shutdown latch on `MainThreadSessionScheduler`: once `IsLatched` the hop
+  is refused *before* `SwitchToMainThread` is reached, so the caller gets a cancellation
+  on its first await instead of a continuation queued onto a loop that has stopped. The
+  latch is armed per instance by `LatchForShutdown` and process-wide by
+  `Application.quitting`, `beforeAssemblyReload` and `ExitingPlayMode`, and cleared again
+  on entry to play mode and to edit mode; the two editor paths were measured rather than
+  assumed, and the installers are split between a runtime and an editor hook because a
+  domain reload during play does not re-run the runtime one. What is **not** closed is
+  the arming in production: nothing outside the tests calls `LatchForShutdown`, so the
+  instance latch is exercised only by them — the three process-wide signals are
+  self-installed and do reach it in a real editor.
+- [x] Revisit the request-timeout hop's non-cancellation failure path. The hop is still
+  swallowed — nothing there may outrank the failure being reported to the caller, and two
+  tests hold that half in place — but it is no longer silent: a teardown hop that fails
+  for a reason other than cancellation now publishes a `SessionFault` naming the
+  exception, so the fact that the `finally` un-registered the gate entry off-context
+  leaves a trace. A cancelled hop stays unreported deliberately, because the only thing
+  that can cancel it is the scheduler's own shutdown latch and every ordinary quit would
+  otherwise publish a fault. **Who reads it is a separate question and the honest answer
+  today is nobody** — no production type subscribes to `SubscribeToFaults`, so the
+  publish reaches an empty handler list until a fault sink exists. That sink is unbuilt
+  and is the real remainder here.
+- [x] Guard `SendAsync` against a caller with no `SynchronizationContext`. Closed by
+  passing `useCurrentSynchronizationContext: false` at every `Task`-to-`UniTask` boundary
+  in `TcpTransport`: the write gate's `WaitAsync`, the stream's `FlushAsync`, and — found
+  while pinning it — `ConnectAsync`, which had the same defect one step earlier and would
+  have refused the connect before a send could be attempted at all. `WriteAsync` returns
+  a `ValueTask`, whose `AsUniTask` has no such overload and needs none: it is a bare
+  `await`, which captures the current context rather than demanding a `TaskScheduler`
+  from it, so a null context resumes on the pool instead of throwing. Two tests pin it,
+  both driving a real socket from a
+  thread-pool thread with the premise (`SynchronizationContext.Current` is null)
+  asserted rather than assumed.
 - [ ] Add disposable-server golden integration tests. Superseded in part: the end-to-end
-  tier now runs against a remote server via `ECHO_SERVER_HOST` rather than a disposable
-  local one, so what remains here is whatever a disposable server would cover that a
-  shared remote one cannot.
-- [ ] Define app/session/scene VContainer lifetime scopes.
+  tier now runs against a remote server — configured through the endpoint asset or
+  `ECHO_SERVER_HOST` — rather than a disposable local one, so what remains here is
+  whatever a disposable server would cover that a shared remote one cannot.
+- [ ] Define app/session/scene VContainer lifetime scopes. **Partly satisfied, and
+  deliberately left open rather than ticked.** The app root scope exists —
+  `HarnessLifetimeScope` on `Assets/Scenes/Bootstrap.unity`, which calls
+  `HarnessComposition.Configure` and registers the session driver as its entry point.
+  Session and scene scopes are deferred to Phase 2: with one scene and no login flow, a
+  child scope with one child and a lifetime identical to its parent is ceremony, and a
+  login flow is what would give a session scope something to mean. The deferral is not
+  free and the cost is recorded where it bites: `CompositionSmokeTests` pins the session
+  as a `Singleton` and says in its own comment that the moment a child scope exists,
+  `Scoped` would give every scope its own `ProtocolSession` over its own `TcpTransport`.
+  Whoever adds the second scope must decide that, not inherit it.
 - [ ] Implement Addressables catalog environments, build profiles, release
   ownership, CDN credentials, rollback, and cache budgets.
 - [ ] Select, audit, pin, and import xLua only if hot-update requirements justify it.

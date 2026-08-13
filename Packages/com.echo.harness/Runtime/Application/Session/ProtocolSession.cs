@@ -24,6 +24,7 @@ namespace Echo.Harness.Application
 
         private readonly ITransport transport;
         private readonly IClock clock;
+        private readonly IElapsedTime time;
         private readonly ISessionScheduler scheduler;
         private readonly List<Action<SessionFault>> faultHandlers = new List<Action<SessionFault>>();
         private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
@@ -34,10 +35,15 @@ namespace Echo.Harness.Application
         private CancellationTokenSource pumpCancellation;
         private bool disposed;
 
-        public ProtocolSession(ITransport transport, IClock clock, ISessionScheduler scheduler)
+        public ProtocolSession(
+            ITransport transport,
+            IClock clock,
+            IElapsedTime time,
+            ISessionScheduler scheduler)
         {
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
             this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            this.time = time ?? throw new ArgumentNullException(nameof(time));
             this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         }
 
@@ -60,6 +66,56 @@ namespace Echo.Harness.Application
             catch
             {
                 State = SessionState.Disconnected;
+                throw;
+            }
+
+            // The hop, and everything below it depends on having taken it. The
+            // transport's connect does not capture a context, so this frame resumes
+            // on whatever thread the socket completed on - a pool one. The three
+            // lines below publish the session as usable from there: they write
+            // State, which is a plain auto-property and not volatile, install
+            // pumpCancellation, and start the pump. A shutdown running on the
+            // session's context at the same moment reads Connecting, calls
+            // CancelPump while pumpCancellation is still null, disconnects, and
+            // settles on Disconnected - and then this continuation lands and
+            // re-marks a session Connected with a live pump after its shutdown
+            // declared itself finished. Taking the hop first puts these writes and
+            // that shutdown on one thread, which is what makes the two orderable at
+            // all.
+            try
+            {
+                await scheduler.SwitchToSessionContextAsync(cancellationToken);
+            }
+            catch
+            {
+                // A session that cannot reach its context must not declare itself
+                // Connected. Everything the session does after this point - the
+                // pump's dispatch, the gate in pendingRequests, the subscriber
+                // lists - is single-threaded only because the context exists to
+                // confine it to, so a Connected session behind an unreachable
+                // context is a promise that cannot be kept. Reported as a failed
+                // start instead, which is a state the caller already handles.
+                //
+                // The link is closed rather than left open, and that is the half
+                // that is not symmetry: the connect SUCCEEDED, so unlike the catch
+                // above there is a real socket here, and abandoning it makes the
+                // server hold the session until its own pong timeout. This close
+                // runs off the context by construction - reaching the context is
+                // the thing that just failed - which is safe in a way the writes
+                // below are not, because DisconnectAsync touches the transport and
+                // none of the session's own collections.
+                State = SessionState.Disconnected;
+                try
+                {
+                    await transport.DisconnectAsync(CancellationToken.None);
+                }
+                catch
+                {
+                    // The hop's failure is what the caller is owed. A close that
+                    // also failed adds nothing it can act on, and letting it win
+                    // would replace the report that names the cause.
+                }
+
                 throw;
             }
 
@@ -203,7 +259,36 @@ namespace Echo.Harness.Application
             pendingRequests[responseId] = completion;
             try
             {
-                await SendAsync(requestId, payload, cancellationToken);
+                // The send gets a catch of its own, and the reason is that a throw
+                // from here matches NEITHER of the two clauses below: they hang off
+                // the inner try, which this await has not entered yet. Without this
+                // block a failing send leaves the outer try straight for the
+                // finally, and that finally mutates pendingRequests. Since the
+                // transport's send-gate wait no longer captures a context, the throw
+                // arrives on whatever thread failed the write - a thread pool one
+                // for a socket - so the finally would race the pump's Dispatch over
+                // the same unsynchronised Dictionary. Reachable three ways today:
+                // the send budget refusing, a socket write failing, and the
+                // null-stream guard.
+                //
+                // Wrapped around this await alone rather than caught on the outer
+                // try, which would double-hop the two exits below that have already
+                // hopped. Unconditional within it, because this frame cannot tell
+                // which half of SendAsync threw: the session's own validation runs
+                // synchronously on the caller's thread, where a hop costs a switch
+                // and buys nothing, while the transport's runs inside the returned
+                // UniTask and can land anywhere. Paying for the first is the price
+                // of covering the second, and the first is already an argument
+                // error on a request that never left.
+                try
+                {
+                    await SendAsync(requestId, payload, cancellationToken);
+                }
+                catch
+                {
+                    await SwitchToSessionContextForTeardownAsync();
+                    throw;
+                }
 
                 using var timeoutCancellation =
                     CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -214,13 +299,20 @@ namespace Echo.Harness.Application
                         .AttachExternalCancellation(timeoutCancellation.Token);
                     return (TResponse)response;
                 }
-                // Both failing exits hop, and only the exception each produces
-                // differs. Hopping before the throw means hopping before this
-                // frame's finally removes its gate entry; without it the resuming
-                // thread and the pump can mutate pendingRequests concurrently, and
-                // a Dictionary resized from two threads can misroute a response to
-                // subscribers. The success path needs no hop: TrySetResult is
-                // called from Dispatch, which already ran on the context.
+                // ALL THREE failing exits hop. This used to open "Both failing
+                // exits hop", counting only the two below, and that was the whole
+                // error: a failing send is a third exit and it took no hop at all -
+                // it is not caught here, because these clauses hang off the inner
+                // try it never entered. It has its own catch, above. Correcting the
+                // count is the point; the two below are unchanged.
+                //
+                // Only the exception each of these two produces differs. Hopping
+                // before the throw means hopping before this frame's finally
+                // removes its gate entry; without it the resuming thread and the
+                // pump can mutate pendingRequests concurrently, and a Dictionary
+                // resized from two threads can misroute a response to subscribers.
+                // The success path needs no hop: TrySetResult is called from
+                // Dispatch, which already ran on the context.
                 //
                 // Two clauses rather than one widened filter, because the two exits
                 // must stay distinguishable to a caller: a deadline that elapsed is
@@ -312,10 +404,53 @@ namespace Echo.Harness.Application
         /// Dispose nor CancelPump can free it. On the caller-cancel path that
         /// exposure is NEW: before this hop existed, a cancelled caller returned
         /// promptly and took no hop at all. The timeout path already had it, so
-        /// CancellationToken.None makes nothing there worse. It is narrow today only
-        /// because nothing in production constructs MainThreadSessionScheduler - see
-        /// the open item in docs/migration-checklist.md - and it stops being narrow
-        /// on the day something does.</para>
+        /// CancellationToken.None makes nothing there worse.</para>
+        ///
+        /// <para><b>What bounds it, corrected.</b> This paragraph used to end "narrow
+        /// today only because nothing in production constructs
+        /// MainThreadSessionScheduler ... and it stops being narrow on the day
+        /// something does". That day has come and the reason was wrong twice over.
+        /// HarnessComposition.Configure now registers MainThreadSessionScheduler as
+        /// ISessionScheduler, so any container built from the composition root
+        /// constructs one. And the stall had already been narrowed by something this
+        /// paragraph never mentioned: the scheduler's shutdown latch post-dates it.
+        /// Once IsLatched, SwitchToSessionContextAsync refuses before an awaiter is
+        /// ever constructed, so the hop comes back cancelled instead of parking on a
+        /// dead loop, and the swallow above handles it. The stall survives only where
+        /// the player loop stops without any of the three signals reaching the
+        /// scheduler.</para>
+        ///
+        /// <para><b>The schedule fact that used to follow has expired.</b> It read:
+        /// "registration is lazy and nothing resolves the graph yet. There is no
+        /// LifetimeScope and no scene in this repository, and Configure has no caller
+        /// outside the EditMode smoke test, so no session is started and no request
+        /// is ever in flight from anything the composition root wires." Every clause
+        /// of that is now false. HarnessLifetimeScope is a LifetimeScope,
+        /// Assets/Scenes/Bootstrap.unity carries one, its Configure calls the
+        /// composition root's, and the entry point it registers - HarnessSessionDriver
+        /// - calls StartAsync whenever an endpoint is configured. A session is
+        /// started and a request can be in flight from what the composition root
+        /// wires, so nothing about the schedule bounds this any more. Do not restore
+        /// the sentence; check the scene and the driver instead.</para>
+        ///
+        /// <para>It also named the condition that would make its own expiry safe -
+        /// "it must be paired with a shutdown that reaches StopAsync or Dispose" -
+        /// and that arrived in the same change rather than after it. The driver
+        /// reaches StopAsync from three places: the process quit signal, an editor
+        /// assembly reload, and its own Dispose, which covers a scope torn down with
+        /// no quit at all. Those are what fail the waiters with a truthful,
+        /// non-cancellation exception. So what is left is the residual the paragraph
+        /// above already names and nothing wider - a player loop that stops without
+        /// any of the scheduler's shutdown signals reaching it. There a latched pump
+        /// leaves through the OperationCanceledException catch in RunPumpAsync,
+        /// nothing answers the waiter, and the caller is told its request timed out:
+        /// a fabricated network failure for an orderly quit.</para>
+        ///
+        /// <para>One thing the swallow below no longer loses, and one it still does.
+        /// A hop that fails for a reason other than shutdown now publishes a fault
+        /// instead of vanishing. Who reads it is a separate question and the honest
+        /// answer today is nobody: no production type subscribes to faults, so that
+        /// publish reaches an empty handler list until a sink exists.</para>
         /// </summary>
         private async UniTask SwitchToSessionContextForTeardownAsync()
         {
@@ -323,17 +458,61 @@ namespace Echo.Harness.Application
             {
                 await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
             }
-            catch (Exception)
+            catch (OperationCanceledException)
             {
-                // See above: nothing here may outrank the failure being reported.
+                // Orderly, and it is the scheduler rather than any caller that puts
+                // this shape here. The hop is passed CancellationToken.None, so no
+                // token a caller holds can cancel it; what can is the scheduler's
+                // own shutdown latch, which refuses once the player loop is going
+                // away. Reporting that would make every ordinary quit publish a
+                // fault.
+            }
+            catch (Exception ex)
+            {
+                // Still swallowed, for the reason above: nothing here may outrank
+                // the failure being reported to the caller.
                 // AFailingTeardownHopDoesNotReplaceTheTimeout and its cancellation
-                // sibling are what hold this catch in place.
+                // sibling are what hold that half in place. What is new is that it
+                // is no longer silent. The finally that follows un-registers this
+                // request's gate entry while running off the session's context, and
+                // a reader of faultHandlers is the only place that can ever surface
+                // it - so, plainly: nothing outside the tests subscribes yet, and
+                // today this write reaches an empty handler list. It is written
+                // anyway, because the alternative is a defect that leaves nothing
+                // behind for a sink to find on the day one exists.
+                //
+                // DispatchFailure rather than SubscriberFailure. That member is
+                // spoken for - DeliverToSubscribers grades a fault-handler callback
+                // that threw, and no subscriber failed here. TransportFailure would
+                // be worse: it is what FaultTheStreamAsync publishes when the byte
+                // stream is gone, and this link is untouched and the session still
+                // Connected. What is left is the member defined as the failure
+                // nobody predicted, against the same single-threading invariant the
+                // hop exists to keep, and it carries the exception's type name for
+                // the same reason that publish does. The fit is not exact and is not
+                // claimed to be; a member of its own was not added because that is
+                // not a decision this task may take alone.
+                //
+                // default for the MessageId, because the failure belongs to no
+                // single message - which is also what tells it apart from the
+                // per-message DispatchFailure the pump publishes.
+                PublishFault(new SessionFault(
+                    SessionFaultKind.DispatchFailure,
+                    default,
+                    "A request's teardown hop failed, so its gate entry was " +
+                    $"un-registered off the session context: {ex.GetType().Name}: {ex.Message}"));
             }
         }
 
         public async UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken)
         {
+            // Two ports, two jobs. The wall clock stamps the ts the server echoes
+            // back, because that value leaves the process and must be a moment. The
+            // returned figure is a duration and comes from the monotonic source, so
+            // a clock synchronisation landing inside the probe can no longer make
+            // this method report a negative latency.
             var sentAt = clock.UtcNow;
+            var startedAt = time.GetTimestamp();
             var request = new ClientPingRequestDto { Ts = sentAt.ToUnixTimeMilliseconds() };
 
             var response = await RequestAsync<ClientPingResponseDto>(
@@ -351,7 +530,7 @@ namespace Echo.Harness.Application
                 throw new CorrelationMismatchException(MessageId.ClientPingResponse, diagnostic);
             }
 
-            return clock.UtcNow - sentAt;
+            return time.GetElapsedTime(startedAt);
         }
 
         public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler)
@@ -478,6 +657,58 @@ namespace Echo.Harness.Application
                 }
                 catch (OperationCanceledException)
                 {
+                    // Deliberately silent, and there is one caller who must know
+                    // why. THREE things reach here, and they do not leave the same
+                    // wreckage behind. This used to say two, which was the whole
+                    // error: it named the route that cleans up after itself and
+                    // only one of the two that do not.
+                    //
+                    // 1. The pump's own token, cancelled by CancelPump from
+                    //    StopAsync or Dispose. Both fail every waiter themselves -
+                    //    StopAsync in its finally, Dispose before it launches the
+                    //    disconnect - with a truthful, non-cancellation exception.
+                    //    Nothing is left to do here. CancelPump has a third
+                    //    caller, FaultTheStreamAsync, and it is named here so that
+                    //    the list is complete by statement rather than only by
+                    //    consequence: it cannot arrive at this catch, because the
+                    //    pump reaches it only from the catch below and returns as
+                    //    soon as it comes back, and it fails the waiters before
+                    //    cancelling anything in any case.
+                    // 2. The token the CALLER handed StartAsync. pumpCancellation is
+                    //    a linked source built from it, so cancelling the caller's
+                    //    token cancels this one without passing through StopAsync or
+                    //    Dispose. Nothing fails the waiters on this route.
+                    // 3. A scheduler that refused the hop because the player loop is
+                    //    going away. Nothing fails the waiters on this route either.
+                    //
+                    // On 2 and 3 a request in flight waits out its own deadline and
+                    // is told it timed out: a fabricated network failure for an
+                    // orderly quit. So whatever drives the lifecycle must reach
+                    // StopAsync or Dispose on shutdown - and must reach it even when
+                    // its own StartAsync token has already been cancelled out from
+                    // under it, which is route 2 and is not hypothetical. The DI
+                    // package this project composes with owns the
+                    // CancellationTokenSource it hands to IAsyncStartable.StartAsync:
+                    // AsyncStartableLoopItem holds one as a readonly field, passes
+                    // its token to every entry point, and cancels it from its own
+                    // Dispose, which the scope's disposal reaches. A driver that
+                    // forwards that token straight into StartAsync - the obvious
+                    // implementation - is therefore exactly a driver whose pump can
+                    // be cancelled before any shutdown hook of its own runs.
+                    // (The package is described rather than named because the
+                    // architecture gate forbids that token anywhere under
+                    // Runtime/Application, which is the same rule that keeps
+                    // container types out of this tier.)
+                    //
+                    // What that obligation needs is PROMPTNESS, not ordering.
+                    // Reaching StopAsync or Dispose after the pump has already
+                    // exited still repairs the report, because FailPendingRequests
+                    // publishes truthfully whenever it runs; what cannot be
+                    // repaired is a waiter whose own deadline elapsed first and
+                    // that has already been told it timed out. Ordering the
+                    // shutdown ahead of the cancellation is one way to guarantee
+                    // that, not the requirement itself - and a wider catch here is
+                    // not a way to guarantee it at all.
                     return;
                 }
                 catch (Exception exception)

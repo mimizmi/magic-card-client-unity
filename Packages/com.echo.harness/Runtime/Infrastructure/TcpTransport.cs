@@ -11,7 +11,7 @@ namespace Echo.Harness.Infrastructure
     public sealed class TcpTransport : ITransport, IDisposable
     {
         private readonly TcpTransportOptions options;
-        private readonly IClock clock;
+        private readonly IElapsedTime time;
         private readonly byte[] header =
             new byte[WireFrameSpec.LengthPrefixBytes + WireFrameSpec.MessageIdBytes];
 
@@ -47,11 +47,19 @@ namespace Echo.Harness.Infrastructure
         //      any of the mobile targets may - interleaves two callers' frames
         //      and desynchronizes the stream. The server then reads a garbage
         //      length prefix and closes without an error frame.
-        //   3. SendBudget.TryConsume is a read-modify-write over an int and a
-        //      DateTimeOffset, and is not thread-safe on its own. The second is
-        //      the more dangerous half - it is wide enough to tear. This gate is
-        //      the whole of what makes it safe, and it is what keeps tokens in
-        //      wire order.
+        //   3. SendBudget.TryConsume is a read-modify-write over an int and two
+        //      longs, and is not thread-safe on its own. C# guarantees atomic
+        //      reads and writes only up to 32 bits, and `long` is excluded, so
+        //      `lastFillTimestamp` and `carryTicks` can tear on a 32-bit runtime
+        //      - a mobile build of the kind clause 2 has in mind. Replacing the
+        //      DateTimeOffset narrowed that hazard rather than removing it: a
+        //      torn long now corrupts an interval, not a wall-clock moment. And
+        //      the lost update to `tokens` needs no tearing at all, so this
+        //      clause stands on every target, 64-bit ones included. Either way
+        //      the effect is the same: an effective send rate silently above the
+        //      server's hard limit, and exceeding it closes the connection with
+        //      no error frame. This gate is the whole
+        //      of what makes it safe, and it is what keeps tokens in wire order.
         //
         // Deliberately never disposed. SemaphoreSlim.Dispose does not release
         // waiters, so a sender parked in WaitAsync when Dispose ran would never be
@@ -88,10 +96,10 @@ namespace Echo.Harness.Infrastructure
         // connect, Host and Port are used once - so this was the one live read left.
         private readonly TimeSpan readIdleTimeout;
 
-        public TcpTransport(TcpTransportOptions options, IClock clock)
+        public TcpTransport(TcpTransportOptions options, IElapsedTime time)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
-            this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+            this.time = time ?? throw new ArgumentNullException(nameof(time));
 
             // Rejected here, where the option can still be named. The deadline is
             // built on CancelAfter, which throws ArgumentOutOfRangeException on a
@@ -131,12 +139,20 @@ namespace Echo.Harness.Infrastructure
             using var registration = cancellationToken.Register(() => connecting.Close());
             try
             {
-                await connecting.ConnectAsync(options.Host, options.Port).AsUniTask();
+                // useCurrentSynchronizationContext: false, for the reason spelled
+                // out at the gate wait in SendAsync. This site was not in the plan
+                // that added the other two, and including it is deliberate:
+                // TcpClient.ConnectAsync(string, int) returns a Task, so it binds the
+                // same eager FromCurrentSynchronizationContext() and a context-less
+                // caller cannot open a link at all. Fixing the send and leaving this
+                // would have left the one call that must succeed first still
+                // carrying the defect the send fix exists to remove.
+                await connecting.ConnectAsync(options.Host, options.Port).AsUniTask(false);
 
                 // Published ahead of the fields that advertise a usable transport,
                 // so a send can never find a Connected transport with no budget
                 // behind it.
-                budget = new SendBudget(options.SendBudgetPerSecond, clock);
+                budget = new SendBudget(options.SendBudgetPerSecond, time);
 
                 // Inside the try, not after it. Cancellation can fire between a
                 // successful connect and the registration being disposed, and the
@@ -204,7 +220,36 @@ namespace Echo.Harness.Infrastructure
 
             // Acquired outside the try, so a cancelled or failed WaitAsync cannot
             // reach a finally that releases a gate it never took.
-            await sendGate.WaitAsync(cancellationToken).AsUniTask();
+            // useCurrentSynchronizationContext: false, because the default calls
+            // TaskScheduler.FromCurrentSynchronizationContext() eagerly - it is an
+            // argument, evaluated before any continuation is registered - and that
+            // throws InvalidOperationException on a thread that has no context. It
+            // throws before this gate is taken, so a context-less caller got a
+            // bookkeeping failure naming a TaskScheduler in place of a transport one.
+            //
+            // Nothing here needs the caller's context: the continuation only takes
+            // the gate, and everything it then touches is either volatile or under
+            // the gate.
+            //
+            // It does change where the continuation runs, and that is a real change
+            // rather than a technicality. The default posts the continuation to the
+            // caller's SynchronizationContext, so on the main thread the rest of
+            // SendAsync used to resume there; false selects TaskScheduler.Current,
+            // which on the main thread is the thread pool scheduler and not the
+            // player loop. Measured on this editor rather than assumed: a gate wait
+            // that genuinely suspends resumed on a pool thread with a null context
+            // in 3 of 3 samples, while an uncontended wait - already complete when
+            // it is awaited - resumed inline on the calling thread in only 1 of 5.
+            // So a caller must no longer assume a send hands it back on the main
+            // thread, and on an uncontended gate it cannot assume the opposite
+            // either. That race is also why reverting the flush below on its own
+            // leaves the neighbouring send tests green but many times slower.
+            //
+            // Safe here because nothing this class does after the gate touches an
+            // engine API, and ProtocolSession does not lean on it: its pump hops
+            // explicitly through ISessionScheduler after every receive, which is
+            // the one place the session's main-thread confinement is decided.
+            await sendGate.WaitAsync(cancellationToken).AsUniTask(false);
             try
             {
                 // Captured once for the reason spelled out at ReadExactlyAsync's
@@ -260,7 +305,16 @@ namespace Echo.Harness.Infrastructure
                     await active
                         .WriteAsync(new ReadOnlyMemory<byte>(frame), cancellationToken)
                         .AsUniTask();
-                    await active.FlushAsync(cancellationToken).AsUniTask();
+                    // false for the same reason as the gate wait. The write above
+                    // cannot take the flag - AsUniTask over a ValueTask has no such
+                    // overload in UniTask 2.5.11, only the parameterless
+                    // `async UniTask AsUniTask(this ValueTask task) => await task;`
+                    // - and it does not need one: a bare await captures the current
+                    // context rather than demanding a TaskScheduler from it, so a
+                    // null context resumes on the pool instead of throwing. Flush
+                    // returns a Task, so it is on the throwing side of that line and
+                    // has to be told.
+                    await active.FlushAsync(cancellationToken).AsUniTask(false);
                 }
                 // The same partition as ReadExactlyAsync's, and bare on the same two
                 // trailing clauses for the reason spelled out there. Do not make them
@@ -322,9 +376,9 @@ namespace Echo.Harness.Infrastructure
             // server sends a Ping every 15 s, which is what makes silence
             // measurable at all.
             //
-            // Real time, not the injected IClock. CancelAfter runs off a timer and
-            // there is nothing to drive a virtual clock against a real socket, so
-            // this deliberately does not use `clock`. Do not "fix" that.
+            // Real time, not the injected IElapsedTime. CancelAfter runs off a
+            // timer and there is nothing to drive a virtual clock against a real
+            // socket, so this deliberately does not use `time`. Do not "fix" that.
             using var deadline =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
