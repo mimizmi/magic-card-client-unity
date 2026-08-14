@@ -343,5 +343,23 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(options.Host, Is.EqualTo(expected.Host));
             Assert.That(options.Port, Is.EqualTo(expected.Port));
         }
+
+        // Resolving each of these is not ceremony: every VContainer registration is
+        // lazy, and SessionFaultRouter subscribes in its constructor, so a
+        // registration nothing resolves is a fault sink that never sees a fault.
+        [Test]
+        public void HarnessComposition_ResolvesTheFaultSinkAndTheLoginUseCase()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(container.Resolve<IFaultLog>(), Is.Not.Null);
+            Assert.That(container.Resolve<ILoginUseCase>(), Is.Not.Null);
+            Assert.That(
+                container.Resolve<SessionFaultRouter>(),
+                Is.SameAs(container.Resolve<SessionFaultRouter>()),
+                "Two routers would mean two subscriptions and every fault logged twice.");
+        }
     }
 }

@@ -81,6 +81,14 @@ namespace Echo.Harness.Bootstrap
             builder.Register<ProtocolSession>(Lifetime.Singleton)
                 .As<IProtocolSession>()
                 .As<ISessionStatus>();
+
+            // The sink. Registered here rather than in HarnessLifetimeScope so that
+            // the EditMode composition tests can resolve it from a bare
+            // ContainerBuilder with no scene.
+            builder.Register<UnityFaultLog>(Lifetime.Singleton).As<IFaultLog>();
+            builder.Register<SessionFaultRouter>(Lifetime.Singleton);
+
+            builder.Register<LoginUseCase>(Lifetime.Singleton).As<ILoginUseCase>();
         }
     }
 }

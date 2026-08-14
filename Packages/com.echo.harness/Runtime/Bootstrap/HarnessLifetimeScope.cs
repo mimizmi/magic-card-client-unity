@@ -24,6 +24,10 @@ namespace Echo.Harness.Bootstrap
         {
             HarnessComposition.Configure(builder);
             builder.RegisterEntryPoint<HarnessSessionDriver>();
+
+            // Not decoration. See SessionFaultRouterEntryPoint: without this line
+            // the router is registered and never constructed, and nothing fails.
+            builder.RegisterEntryPoint<SessionFaultRouterEntryPoint>();
         }
     }
 }

@@ -345,6 +345,26 @@ $ApplicationText = ($ApplicationSources | Get-Content -Raw) -join "`n"
 Assert-True ($ApplicationText -notmatch '\b(UnityEngine|Addressables|R3|VContainer|XLua)\b') `
     'Application sources may only use the approved UniTask async boundary.'
 
+# The two entry-point registrations live in HarnessLifetimeScope.Configure, which
+# is a protected override on a MonoBehaviour and therefore unreachable from an
+# EditMode test -- there is no way to call it without a scene. So they are pinned
+# by source text instead.
+#
+# Be precise about what this proves and what it does not. It proves the lines are
+# present. It does NOT prove VContainer runs them, and no test on this runtime
+# proves that either. What makes the weaker check worth having is the failure it
+# catches: deleting the SessionFaultRouterEntryPoint line leaves the router
+# registered, never constructed, subscribed to nothing -- and every other test in
+# the repository still green.
+$LifetimeScopeText = Get-Content -Raw -LiteralPath (
+    [System.IO.Path]::Combine(
+        $ProjectRoot,
+        'Packages\com.echo.harness\Runtime\Bootstrap\HarnessLifetimeScope.cs'))
+Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<HarnessSessionDriver>') `
+    'HarnessLifetimeScope must register the session driver as an entry point.'
+Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<SessionFaultRouterEntryPoint>') `
+    'HarnessLifetimeScope must register the fault router entry point, or no fault is ever read.'
+
 $Contract = Get-Content -Raw -LiteralPath (
     Join-Path $ProjectRoot 'Packages\com.echo.harness\Fixtures\protocol.contract.json') |
     ConvertFrom-Json
