@@ -114,8 +114,21 @@ $ExpectedRuntimeReferences = [ordered]@{
         'Echo.Harness.Domain', 'Echo.Harness.Contracts', 'UniTask')
     'Echo.Harness.Infrastructure' = @(
         'Echo.Harness.Application', 'Echo.Harness.Contracts', 'UniTask', 'Unity.Addressables')
+    # R3.Unity was dropped when this assembly got its first real content. It was
+    # referenced here and used nowhere in Runtime -- the only `using R3;` in the
+    # repository are in the two test assemblies, which reference it directly and
+    # whose reference lists this gate deliberately does not pin. UI Toolkit's
+    # INotifyBindablePropertyChanged covers change notification, and a reactive
+    # alternative would have bypassed the dataSource binding this repository
+    # already committed to in HarnessHealthViewModel.
+    #
+    # UniTask took its place and is not a widening of what Presentation may see:
+    # asmdef references are not transitive, so naming ILoginUseCase's UniTask
+    # return type requires the direct reference. Echo.Harness.Contracts is still
+    # absent, which is the constraint that actually matters -- no wire DTO can
+    # reach a view-model.
     'Echo.Harness.Presentation' = @(
-        'Echo.Harness.Application', 'R3.Unity')
+        'Echo.Harness.Application', 'UniTask')
     'Echo.Harness.Bootstrap' = @(
         'Echo.Harness.Domain',
         'Echo.Harness.Contracts',

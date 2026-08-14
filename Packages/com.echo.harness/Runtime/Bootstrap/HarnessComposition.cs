@@ -1,6 +1,7 @@
 using Echo.Harness.Application;
 using Echo.Harness.Domain;
 using Echo.Harness.Infrastructure;
+using Echo.Harness.Presentation;
 using VContainer;
 
 namespace Echo.Harness.Bootstrap
@@ -89,6 +90,8 @@ namespace Echo.Harness.Bootstrap
             builder.Register<SessionFaultRouter>(Lifetime.Singleton);
 
             builder.Register<LoginUseCase>(Lifetime.Singleton).As<ILoginUseCase>();
+
+            builder.Register<LoginViewModel>(Lifetime.Singleton);
         }
     }
 }
