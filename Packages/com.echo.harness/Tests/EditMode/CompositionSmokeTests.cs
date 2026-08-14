@@ -267,6 +267,22 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(options.Port, Is.EqualTo(defaults.Port));
         }
 
+        // A second ProtocolSession behind ISessionStatus would mean a second
+        // TcpTransport and a second socket, and every other test here would still
+        // pass: they all resolve one interface at a time.
+        [Test]
+        public void HarnessComposition_ExposesOneSessionThroughBothInterfaces()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(
+                container.Resolve<ISessionStatus>(),
+                Is.SameAs(container.Resolve<IProtocolSession>()),
+                "ISessionStatus must be the same instance as IProtocolSession.");
+        }
+
         // The one-argument overload is the only line in this repository that reads
         // endpoint configuration in production, and it is what a LifetimeScope will
         // call. Replacing its body with a hard-coded NotConfigured left every test

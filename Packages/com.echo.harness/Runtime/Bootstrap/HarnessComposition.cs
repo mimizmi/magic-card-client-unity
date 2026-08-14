@@ -74,7 +74,13 @@ namespace Echo.Harness.Bootstrap
             });
 
             builder.Register<TcpTransport>(Lifetime.Singleton).As<ITransport>();
-            builder.Register<ProtocolSession>(Lifetime.Singleton).As<IProtocolSession>();
+            // Two interfaces, ONE instance. VContainer gives each As<T>() on the same
+            // Register call the same singleton, which is the entire point: a second
+            // registration would build a second ProtocolSession over a second
+            // TcpTransport and open a second socket.
+            builder.Register<ProtocolSession>(Lifetime.Singleton)
+                .As<IProtocolSession>()
+                .As<ISessionStatus>();
         }
     }
 }
