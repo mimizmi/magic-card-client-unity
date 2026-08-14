@@ -154,6 +154,17 @@ deliverable.
   the arming in production: nothing outside the tests calls `LatchForShutdown`, so the
   instance latch is exercised only by them — the three process-wide signals are
   self-installed and do reach it in a real editor.
+- [ ] Diagnose `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`,
+  which is intermittently red on both runner paths — once in five batch runs at
+  `1d8fc21`, and about one in ten on the connected path. This item exists because the
+  failure was previously recorded only as a paragraph in `docs/verification-matrix.md`
+  and so was not tracked as open work anywhere. **It is not known whether this is a defect in the
+  main-thread hop or an artifact of the test apparatus**, and a spike that ruled out
+  the two obvious mechanisms did not identify a third; the surviving lead, and the
+  reason a separate probe cannot chase it, are written up in that document under "What
+  a spike at `1d8fc21` ruled out, and what it did not". Not a blocker for Phase 2:
+  nothing in production subscribes to `SubscribeToFaults` yet, so the hop's failure
+  mode has no reader either way.
 - [x] Revisit the request-timeout hop's non-cancellation failure path. The hop is still
   swallowed — nothing there may outrank the failure being reported to the caller, and two
   tests hold that half in place — but it is no longer silent: a teardown hop that fails

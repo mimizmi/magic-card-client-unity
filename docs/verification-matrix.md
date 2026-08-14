@@ -74,7 +74,7 @@ hand-built siblings green through both.
 | The send budget refuses the message past the server's limit, and `Pong` is exempt | `TcpTransportSendTests.ExceedingTheBudgetThrowsAndKeepsTheConnection`, `.PongIsExemptFromTheBudget`; `SendBudgetTests` for the token arithmetic | The server's limit is a compile-time 30 per second and exceeding it closes the connection with no error frame — on the wire indistinguishable from a pulled cable. A budget that could swallow a heartbeat reply would cause exactly the disconnect it exists to prevent. |
 | Silence beyond the read-idle deadline fails the receive, and every frame resets it | `TcpTransportIdleTests.SilenceBeyondTheIdleTimeoutFailsTheReceive`, `.TheIdleDeadlineResetsForEachFrame`, `.ACallerCancellationIsNotReportedAsAnIdleTimeout` | A half-open link the kernel takes minutes to notice, parking the pump indefinitely. The reset is the other half: without it a healthy connection dies at a fixed age, and a test of the timeout alone cannot tell the two apart. |
 | Every dispatched message hops to the session's context before anything reads or writes session state | `ProtocolSessionConfinementTests` (four tests) | **Mutation-verified.** Confinement, not locking, is what makes a plain `Dictionary` of pending requests and a plain `State` property safe once a real socket introduces a second thread — including the request timeout, which fires on a thread-pool thread and must hop before its `finally` touches the single-flight gate. |
-| `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`, `.SwitchingWhileAlreadyOnTheMainThreadCostsNoFrame`, `.SwitchingWithACancelledTokenOnTheMainThreadThrows`, `.SwitchingWithACancelledTokenOffTheMainThreadAlsoThrows` (PlayMode) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. |
+| `MainThreadSessionScheduler` really reaches the main thread, and costs no frame when already on it | `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`, `.SwitchingWhileAlreadyOnTheMainThreadCostsNoFrame`, `.SwitchingWithACancelledTokenOnTheMainThreadThrows`, `.SwitchingWithACancelledTokenOffTheMainThreadAlsoThrows` (PlayMode) | A scheduler that only appeared to switch, and a hop billed a frame on the common path. Measured rather than asserted. **`SwitchingFromAThreadPoolThreadReachesTheMainThread` is intermittently red** on both paths, mechanism undiagnosed. See "What the gate does not enforce" below for what is and is not known about it; this row is a claim about what the tests are for, not a claim that they are green. |
 | A scheduler refuses the hop once the loop is going away, whether it was latched by its own owner or by the process | `MainThreadSessionSchedulerTests.ALatchedSchedulerCancelsInsteadOfQueueingOntoADeadLoop`, `.AnUnlatchedSchedulerStillHops`, `.TheProcessWideSignalLatchesASchedulerThatNeverLatchedItself`, `.ReturningToEditModeClearsTheProcessWideSignal` (PlayMode; the last is `[Test]` and editor-only, the other three are `[UnityTest]`) | **Mutation-verified.** `IsLatched => latched \|\| processIsShuttingDown` rewritten to `=> latched` deletes every process-wide shutdown signal at once, and until these tests existed the whole pipeline stayed green through it — the static, its three handlers and its two installers were all deletable unnoticed. **What no test here covers:** that those handlers are *subscribed*. A PlayMode test cannot stage a real `Application.quitting` or play-mode exit, because the event that would raise it is the one that ends the run; the tests invoke the handlers directly. The subscription's only evidence is a one-off `Editor.log` observation recorded in the Task 7 reports, not something CI repeats. |
 | The whole session stack resolves from the composition root, once | `CompositionSmokeTests.HarnessComposition_ResolvesTheWholeSessionStack` (both `[TestCase]`s), `.HarnessComposition_RegistersTheSessionAsASingleton` | This row replaces "the type has process-wide side effects with no consumer", which Task 8 made false. `MainThreadSessionScheduler` now has a production consumer: `HarnessComposition` registers it as `ISessionScheduler`, and deleting that one line fails all three tests. Its two installers still run on **every editor domain load** (`[InitializeOnLoadMethod]`) and **every play-mode entry** (`[RuntimeInitializeOnLoadMethod]`) whether or not an instance exists, so the class was live in production before anything constructed it — that part was and remains true. **The "registering is not resolving" caveat this row used to carry is retired**, and is recorded rather than deleted because the shape of the gap is worth keeping: every registration is lazy, so until something resolved the graph, `Configure` could have registered anything at all and stayed green. `HarnessLifetimeScope` on `Assets/Scenes/Bootstrap.unity` now calls it and registers `HarnessSessionDriver` as an entry point, so a session is started and stopped for real — see the note on `ProtocolSession.SwitchToSessionContextForTeardownAsync` for what the driver owes it on the way out. What remains uncovered is narrower and is listed under "What the gate does not enforce": no automated test loads that scene, and the one test that resolves this graph and then uses it needs an endpoint CI does not have. |
 | A configured endpoint reaches the transport, and an unconfigured one leaves it on its defaults | `CompositionSmokeTests.HarnessComposition_PointsTheTransportAtTheConfiguredEndpoint`, `.HarnessComposition_LeavesTheTransportOnItsDefaultsWhenUnconfigured` | **Mutation-verified**, and it is why these two tests exist at all. Nothing in EditMode connects, so resolving `ITransport` proves only that a transport was built, not where it points. With `Configure` mutated to ignore the endpoint entirely, the three tests above stayed green and only `PointsTheTransportAtTheConfiguredEndpoint` failed. The unconfigured half is the mirror: `EndpointResolution.NotConfigured` carries a null `Host` and a `Port` of `0`, so a straight-through assignment builds a transport aimed at nothing rather than at the loopback default, and again only the dedicated test noticed. |
@@ -204,32 +204,68 @@ So the scene, and the graph as a running thing rather than a resolvable one, are
 covered by a local run and a person — not by `verify.ps1` and not by CI.
 
 **`MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`
-is intermittently red, and it is still red as of this document.** It asserts that a
-continuation resumes on the main thread after
+is intermittently red on both paths, and it is still red as of this document.** It
+asserts that a continuation resumes on the main thread after
 `await UniTask.SwitchToMainThread(cancellationToken)`; when it fails it reports
-`Expected: 1 But was: <a thread-pool thread id>`. Two things were measured about it
-during this iteration and both matter:
+`Expected: 1 But was: <a thread-pool thread id>`.
 
-- On the **batch path** it failed **deterministically**, three runs for three across
-  two commits. The batch path is the one CI is configured to take — but those three
-  runs were local, and CI has never reached the Unity suite at all; see **CI
-  boundary**.
 - On the **connected** path it fails roughly **1 in 10**: one red in seven runs when
-  it was first seen, and one red among eleven PlayMode attempts during the last
-  implementation task — eight of those green and two aborted before they produced a
-  verdict — with long green streaks either side (four consecutive pipelines green at
-  one commit, two more while writing this document).
+  it was first seen, and one red among eleven PlayMode attempts during the
+  production-wiring iteration — eight of those green and two aborted before they
+  produced a verdict — with long green streaks either side (four consecutive
+  pipelines green at one commit, two more while this document was first written).
+- On the **batch path** it failed **once in five runs** at `1d8fc21`. Read that as
+  "not every run", not as a rate: five is a small sample, and some of those runs
+  carried throwaway instrumentation alongside the test that has since been reverted.
+  The batch path is the one CI is configured to take — but those runs were local, and
+  CI has never reached the Unity suite at all; see **CI boundary**.
+
+**This paragraph used to say the batch path failed *deterministically*, three runs for
+three, and that is no longer reproducible.** Five runs at `1d8fc21` produced one red.
+Neither `Runtime/Infrastructure/MainThreadSessionScheduler.cs` nor its test has
+changed since `2bc34e9` and `c98d56f`, both dated 2026-08-07 and both ancestors of
+`f7fa10a`, where the earlier failures were recorded — so the code under test was
+byte-identical across every one of these measurements, and whatever moved was
+environmental. What moved is not known.
 
 The consequence has to be said rather than left to be inferred: **every "PlayMode
-15/15" recorded for this iteration is a connected-path number from a suite that
-contains an intermittently failing test.** The figure is true of the run it describes
-and is not a claim that the suite is reliable.
+15/15" recorded for the production-wiring iteration is a connected-path number from a
+suite that contains an intermittently failing test.** The figure is true of the run it
+describes and is not a claim that the suite is reliable.
 
-And **"do not run the batch path" is not a mitigation.** It is the configuration that
-hides the failure — running only the path where the bug is intermittent instead of
-the path where it is certain. The defect is unfixed and undiagnosed, and is carried
-forward as such; whoever picks it up should start from the batch path, where it
-reproduces every time, rather than from the connected one.
+The advice this section used to give — "start from the batch path, where it reproduces
+every time" — is withdrawn along with the determinism claim. There is no path on which
+this reproduces on demand, and that is the main reason it is still undiagnosed. What
+remains true is that **"do not run the batch path" is not a mitigation**: it is the
+configuration that hides the failure more often, not one that removes it.
+
+#### What a spike at `1d8fc21` ruled out, and what it did not
+
+Throwaway instrumentation, since reverted, was run against the failing test and
+against a probe that exercised the hop directly. It established three things:
+
+- **UniTask had not lost track of the main thread.** At the moment of failure
+  `PlayerLoopHelper.MainThreadId` read `1` — correct — while the continuation resumed
+  on pool thread `11`. So `SwitchToMainThreadAwaitable.IsCompleted` was correctly
+  false and the continuation genuinely went through `PlayerLoopHelper.AddContinuation`.
+- **The continuation was not run inline by a torn-down loop.** Neither
+  `AddContinuation` nor `ContinuationQueue.Enqueue` has any inline-execution path:
+  `Enqueue` only appends to an array, and `AddContinuation` throws rather than
+  executing when the queue is null.
+- **A direct probe never caught it in the act.** Three runs, each exercising both the
+  bare `await UniTask.SwitchToMainThread(...)` and the same hop through
+  `MainThreadSessionScheduler.SwitchToSessionContextAsync(...)`, reached the main
+  thread every time.
+
+It did **not** establish the mechanism, and so neither candidate verdict — a
+production defect in the hop, or an artifact of the test apparatus — is supported.
+The three findings above do not sit together comfortably: the continuation was
+enqueued, nothing on the enqueue path can run it inline, and yet it resumed off the
+main thread. That means the model of UniTask's resumption used to reason about this is
+incomplete, and the surface nobody has examined is **who invokes the queued
+continuation, and on which thread** — `ContinuationQueue.Run()` and its callers. That
+is where the next attempt should start, instrumenting the failing test itself rather
+than a separate probe, because a separate probe does not fail when the real one does.
 
 ### A PlayMode run straight after a failed PlayMode run is not fully trustworthy
 
