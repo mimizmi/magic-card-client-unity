@@ -230,6 +230,22 @@ namespace Echo.Harness.Tests.EditMode
                 "One IElapsedTime for the whole app, not one per scope.");
         }
 
+        // A second ProtocolSession behind ISessionStatus would mean a second
+        // TcpTransport and a second socket, and every other test here would still
+        // pass: they all resolve one interface at a time.
+        [Test]
+        public void HarnessComposition_ExposesOneSessionThroughBothInterfaces()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(
+                container.Resolve<ISessionStatus>(),
+                Is.SameAs(container.Resolve<IProtocolSession>()),
+                "ISessionStatus must be the same instance as IProtocolSession.");
+        }
+
         // The tests above resolve every port and would keep passing with the
         // endpoint dropped on the floor, because nothing here connects. Deleting
         // both ternaries in Configure leaves them all green. This is what pins that
@@ -266,22 +282,6 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(options.Host, Is.EqualTo(defaults.Host));
             Assert.That(options.Port, Is.EqualTo(defaults.Port));
-        }
-
-        // A second ProtocolSession behind ISessionStatus would mean a second
-        // TcpTransport and a second socket, and every other test here would still
-        // pass: they all resolve one interface at a time.
-        [Test]
-        public void HarnessComposition_ExposesOneSessionThroughBothInterfaces()
-        {
-            var builder = new ContainerBuilder();
-            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
-            using var container = builder.Build();
-
-            Assert.That(
-                container.Resolve<ISessionStatus>(),
-                Is.SameAs(container.Resolve<IProtocolSession>()),
-                "ISessionStatus must be the same instance as IProtocolSession.");
         }
 
         // The one-argument overload is the only line in this repository that reads

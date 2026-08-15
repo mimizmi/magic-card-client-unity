@@ -36,12 +36,41 @@ namespace Echo.Harness.Bootstrap
         /// </summary>
         private void Start()
         {
+            if (document == null)
+            {
+                Debug.LogError(
+                    "LoginView.document is unset - assign a UIDocument in the Inspector.", this);
+                return;
+            }
+
             var root = document.rootVisualElement;
             root.dataSource = viewModel;
-            root.Q<Button>("submit").clicked += OnSubmit;
+
+            var submit = root.Q<Button>("submit");
+            if (submit == null)
+            {
+                Debug.LogError(
+                    "LoginView found no Button named 'submit' under the document's root - " +
+                    "check that Login.uxml still names its button 'submit'.", this);
+                return;
+            }
+
+            submit.clicked += OnSubmit;
         }
 
-        private void Update() => viewModel.Refresh();
+        private void Update()
+        {
+            if (viewModel == null)
+            {
+                Debug.LogError(
+                    "LoginView.viewModel is null - VContainer injection never ran. Check that " +
+                    "LoginView is still registered via RegisterComponentInHierarchy.", this);
+                enabled = false;
+                return;
+            }
+
+            viewModel.Refresh();
+        }
 
         private void OnSubmit() => viewModel.SubmitAsync().Forget();
     }

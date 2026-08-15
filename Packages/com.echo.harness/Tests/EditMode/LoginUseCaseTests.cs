@@ -18,6 +18,12 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         [Test]
+        public void ConstructingWithoutASessionThrows()
+        {
+            Assert.Throws<ArgumentNullException>(() => new LoginUseCase(null));
+        }
+
+        [Test]
         public void ASuccessfulResponseBecomesSucceededWithThePlayerId()
         {
             var (useCase, session) = Build();

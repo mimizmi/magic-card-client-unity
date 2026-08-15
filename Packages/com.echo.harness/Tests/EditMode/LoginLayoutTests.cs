@@ -47,7 +47,7 @@ namespace Echo.Harness.Tests.EditMode
             var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
             var root = asset.Instantiate();
 
-            var binding = (DataBinding)root.Q<Button>("submit").GetBinding("enabledSelf");
+            var binding = (DataBinding)AssertBound(root, "submit", "enabledSelf");
 
             Assert.That(binding.dataSourcePath, Is.EqualTo(new PropertyPath("CanSubmit")));
         }
@@ -58,7 +58,7 @@ namespace Echo.Harness.Tests.EditMode
             var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
             var root = asset.Instantiate();
 
-            var binding = (DataBinding)root.Q<Label>("connection-status").GetBinding("text");
+            var binding = (DataBinding)AssertBound(root, "connection-status", "text");
 
             Assert.That(binding.dataSourcePath, Is.EqualTo(new PropertyPath("ConnectionStatus")));
         }
@@ -74,23 +74,13 @@ namespace Echo.Harness.Tests.EditMode
             var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
             var root = asset.Instantiate();
 
-            var field = root.Q<TextField>("player-name");
-            Assert.That(field, Is.Not.Null);
+            AssertBound(root, "player-name", "value");
+            var enabledBinding = (DataBinding)AssertBound(root, "player-name", "enabledSelf");
 
-            var valueBinding = field.GetBinding("value");
-            Assert.That(valueBinding, Is.Not.Null, "'player-name' has no DataBinding on 'value'.");
-
-            var enabledBinding = field.GetBinding("enabledSelf");
-            Assert.That(
-                enabledBinding,
-                Is.Not.Null,
-                "'player-name' has no DataBinding on 'enabledSelf'.");
-            Assert.That(
-                ((DataBinding)enabledBinding).dataSourcePath,
-                Is.EqualTo(new PropertyPath("IsConnected")));
+            Assert.That(enabledBinding.dataSourcePath, Is.EqualTo(new PropertyPath("IsConnected")));
         }
 
-        private static void AssertBound(VisualElement root, string elementName, string property)
+        private static Binding AssertBound(VisualElement root, string elementName, string property)
         {
             var element = root.Q(elementName);
             Assert.That(element, Is.Not.Null, $"'{elementName}' did not import from Login.uxml.");
@@ -102,6 +92,8 @@ namespace Echo.Harness.Tests.EditMode
                 $"'{elementName}' has no DataBinding on '{property}'. A data-source-path " +
                 "attribute alone declares no binding - it must be a <Bindings><ui:DataBinding " +
                 "..../></Bindings> child element.");
+
+            return binding;
         }
     }
 }

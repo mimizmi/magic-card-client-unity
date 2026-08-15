@@ -86,6 +86,14 @@ namespace Echo.Harness.Application
 
         private void OnFault(SessionFault fault)
         {
+            // A fault that raced with Dispose - published just before
+            // subscription.Dispose() took effect - must not log or deliver
+            // after the router has declared itself torn down.
+            if (disposed)
+            {
+                return;
+            }
+
             // De-duplication sits ahead of the log rather than beside it, so the
             // count the log shows is the count a reader is meant to act on.
             if (fault.Kind == SessionFaultKind.NoDestination
@@ -140,6 +148,23 @@ namespace Echo.Harness.Application
             {
                 await scheduler.SwitchToSessionContextAsync(CancellationToken.None);
 
+                // The router - and whatever it is delivering to, e.g. a
+                // LoginViewModel - may have been disposed while this delivery
+                // was suspended on the hop above. Delivering afterwards would
+                // reach an observer through state its owner considers gone.
+                // Defense in depth alongside Dispose() clearing
+                // connectionObservers below: that clear is what
+                // DisposingWhileADeliveryIsInFlightStopsThatDeliveryToo
+                // actually measures, since nothing in this synchronous
+                // continuation model lets Dispose interleave between the hop
+                // resuming and the snapshot below. A scheduler whose hop
+                // completion and Dispose can genuinely run concurrently on
+                // different threads is what this guard is for.
+                if (disposed)
+                {
+                    return;
+                }
+
                 Action<SessionFault>[] observers;
                 lock (connectionObservers)
                 {
@@ -184,6 +209,15 @@ namespace Echo.Harness.Application
 
             disposed = true;
             subscription.Dispose();
+
+            // Not merely tidiness: a delivery already past the disposed checks
+            // above and mid-iteration keeps its own snapshot, but clearing this
+            // list is what stops any observer that subscribes nothing further
+            // from being handed a fault by a delivery that starts later.
+            lock (connectionObservers)
+            {
+                connectionObservers.Clear();
+            }
         }
 
         private sealed class Unsubscribe : IDisposable

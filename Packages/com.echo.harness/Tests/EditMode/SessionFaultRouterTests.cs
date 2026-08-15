@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using Cysharp.Threading.Tasks;
 using Echo.Harness.Application;
 using Echo.Harness.Contracts;
 using Echo.Harness.TestKit;
@@ -167,6 +168,56 @@ namespace Echo.Harness.Tests.EditMode
             session.PublishFault(Fault(SessionFaultKind.TransportFailure, MessageId.LoginRequest));
 
             Assert.That(log.Entries, Is.Empty);
+        }
+
+        // DisposeStopsRouting cannot see this: RecordingSessionScheduler
+        // completes synchronously, so a delivery that starts before Dispose is
+        // called always finishes before Dispose runs too, and there is never a
+        // window for the two to race. This uses a scheduler that suspends until
+        // told to continue, so Dispose can run while a delivery is genuinely
+        // in flight - the case neither OnFault nor DeliverToObserversAsync
+        // guarded against before this fix.
+        [Test]
+        public void DisposingWhileADeliveryIsInFlightStopsThatDeliveryToo()
+        {
+            var manualScheduler = new ManualSessionScheduler();
+            using var localRouter = new SessionFaultRouter(session, manualScheduler, log);
+            var reached = false;
+            using var subscription = localRouter.ObserveConnectionFaults(_ => reached = true);
+
+            session.PublishFault(Fault(SessionFaultKind.TransportFailure, MessageId.LoginRequest));
+            Assert.That(
+                reached,
+                Is.False,
+                "The delivery must still be suspended on the scheduler hop at this point.");
+
+            localRouter.Dispose();
+            manualScheduler.Complete();
+
+            Assert.That(
+                reached,
+                Is.False,
+                "A delivery already in flight when Dispose ran must not reach an observer " +
+                "after the router considers itself torn down.");
+        }
+
+        /// <summary>
+        /// Unlike <see cref="RecordingSessionScheduler"/>, the returned
+        /// <see cref="UniTask"/> does not complete until <see cref="Complete"/>
+        /// is called - which is the whole point: it opens a real window between
+        /// a delivery starting and Dispose running.
+        /// </summary>
+        private sealed class ManualSessionScheduler : ISessionScheduler
+        {
+            private UniTaskCompletionSource completion;
+
+            public UniTask SwitchToSessionContextAsync(CancellationToken cancellationToken)
+            {
+                completion = new UniTaskCompletionSource();
+                return completion.Task;
+            }
+
+            public void Complete() => completion.TrySetResult();
         }
     }
 }
