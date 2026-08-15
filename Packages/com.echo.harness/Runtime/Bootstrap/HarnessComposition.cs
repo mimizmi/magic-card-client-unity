@@ -1,6 +1,7 @@
 using Echo.Harness.Application;
 using Echo.Harness.Domain;
 using Echo.Harness.Infrastructure;
+using Echo.Harness.Presentation;
 using VContainer;
 
 namespace Echo.Harness.Bootstrap
@@ -74,7 +75,23 @@ namespace Echo.Harness.Bootstrap
             });
 
             builder.Register<TcpTransport>(Lifetime.Singleton).As<ITransport>();
-            builder.Register<ProtocolSession>(Lifetime.Singleton).As<IProtocolSession>();
+            // Two interfaces, ONE instance. VContainer gives each As<T>() on the same
+            // Register call the same singleton, which is the entire point: a second
+            // registration would build a second ProtocolSession over a second
+            // TcpTransport and open a second socket.
+            builder.Register<ProtocolSession>(Lifetime.Singleton)
+                .As<IProtocolSession>()
+                .As<ISessionStatus>();
+
+            // The sink. Registered here rather than in HarnessLifetimeScope so that
+            // the EditMode composition tests can resolve it from a bare
+            // ContainerBuilder with no scene.
+            builder.Register<UnityFaultLog>(Lifetime.Singleton).As<IFaultLog>();
+            builder.Register<SessionFaultRouter>(Lifetime.Singleton);
+
+            builder.Register<LoginUseCase>(Lifetime.Singleton).As<ILoginUseCase>();
+
+            builder.Register<LoginViewModel>(Lifetime.Singleton);
         }
     }
 }

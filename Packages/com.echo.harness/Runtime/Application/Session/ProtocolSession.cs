@@ -6,7 +6,7 @@ using Echo.Harness.Contracts;
 
 namespace Echo.Harness.Application
 {
-    public sealed class ProtocolSession : IProtocolSession
+    public sealed class ProtocolSession : IProtocolSession, ISessionStatus
     {
         /// <summary>
         /// The deadline <see cref="ProbeRoundTripAsync"/> uses. It is not a default

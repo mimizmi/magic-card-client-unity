@@ -2,6 +2,7 @@ using System;
 using Echo.Harness.Application;
 using Echo.Harness.Bootstrap;
 using Echo.Harness.Infrastructure;
+using Echo.Harness.Presentation;
 using NUnit.Framework;
 using VContainer;
 
@@ -229,6 +230,22 @@ namespace Echo.Harness.Tests.EditMode
                 "One IElapsedTime for the whole app, not one per scope.");
         }
 
+        // A second ProtocolSession behind ISessionStatus would mean a second
+        // TcpTransport and a second socket, and every other test here would still
+        // pass: they all resolve one interface at a time.
+        [Test]
+        public void HarnessComposition_ExposesOneSessionThroughBothInterfaces()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(
+                container.Resolve<ISessionStatus>(),
+                Is.SameAs(container.Resolve<IProtocolSession>()),
+                "ISessionStatus must be the same instance as IProtocolSession.");
+        }
+
         // The tests above resolve every port and would keep passing with the
         // endpoint dropped on the floor, because nothing here connects. Deleting
         // both ternaries in Configure leaves them all green. This is what pins that
@@ -326,6 +343,28 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(options.Host, Is.EqualTo(expected.Host));
             Assert.That(options.Port, Is.EqualTo(expected.Port));
+        }
+
+        // Resolving each of these is not ceremony: every VContainer registration is
+        // lazy, and SessionFaultRouter subscribes in its constructor, so a
+        // registration nothing resolves is a fault sink that never sees a fault.
+        [Test]
+        public void HarnessComposition_ResolvesTheFaultSinkAndTheLoginUseCase()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(container.Resolve<IFaultLog>(), Is.Not.Null);
+            Assert.That(container.Resolve<ILoginUseCase>(), Is.Not.Null);
+            Assert.That(
+                container.Resolve<SessionFaultRouter>(),
+                Is.SameAs(container.Resolve<SessionFaultRouter>()),
+                "Two routers would mean two subscriptions and every fault logged twice.");
+            Assert.That(
+                container.Resolve<LoginViewModel>(),
+                Is.Not.Null,
+                "HarnessComposition registers LoginViewModel; registering is not resolving.");
         }
     }
 }

@@ -3,7 +3,7 @@
   "rootNamespace": "Echo.Harness.Presentation",
   "references": [
     "Echo.Harness.Application",
-    "R3.Unity"
+    "UniTask"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

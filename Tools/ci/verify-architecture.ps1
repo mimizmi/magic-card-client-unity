@@ -114,8 +114,21 @@ $ExpectedRuntimeReferences = [ordered]@{
         'Echo.Harness.Domain', 'Echo.Harness.Contracts', 'UniTask')
     'Echo.Harness.Infrastructure' = @(
         'Echo.Harness.Application', 'Echo.Harness.Contracts', 'UniTask', 'Unity.Addressables')
+    # R3.Unity was dropped when this assembly got its first real content. It was
+    # referenced here and used nowhere in Runtime -- the only `using R3;` in the
+    # repository are in the two test assemblies, which reference it directly and
+    # whose reference lists this gate deliberately does not pin. UI Toolkit's
+    # INotifyBindablePropertyChanged covers change notification, and a reactive
+    # alternative would have bypassed the dataSource binding this repository
+    # already committed to in HarnessHealthViewModel.
+    #
+    # UniTask took its place and is not a widening of what Presentation may see:
+    # asmdef references are not transitive, so naming ILoginUseCase's UniTask
+    # return type requires the direct reference. Echo.Harness.Contracts is still
+    # absent, which is the constraint that actually matters -- no wire DTO can
+    # reach a view-model.
     'Echo.Harness.Presentation' = @(
-        'Echo.Harness.Application', 'R3.Unity')
+        'Echo.Harness.Application', 'UniTask')
     'Echo.Harness.Bootstrap' = @(
         'Echo.Harness.Domain',
         'Echo.Harness.Contracts',
@@ -344,6 +357,26 @@ $ApplicationSources = Get-ChildItem -LiteralPath (
 $ApplicationText = ($ApplicationSources | Get-Content -Raw) -join "`n"
 Assert-True ($ApplicationText -notmatch '\b(UnityEngine|Addressables|R3|VContainer|XLua)\b') `
     'Application sources may only use the approved UniTask async boundary.'
+
+# The two entry-point registrations live in HarnessLifetimeScope.Configure, which
+# is a protected override on a MonoBehaviour and therefore unreachable from an
+# EditMode test -- there is no way to call it without a scene. So they are pinned
+# by source text instead.
+#
+# Be precise about what this proves and what it does not. It proves the lines are
+# present. It does NOT prove VContainer runs them, and no test on this runtime
+# proves that either. What makes the weaker check worth having is the failure it
+# catches: deleting the SessionFaultRouterEntryPoint line leaves the router
+# registered, never constructed, subscribed to nothing -- and every other test in
+# the repository still green.
+$LifetimeScopeText = Get-Content -Raw -LiteralPath (
+    [System.IO.Path]::Combine(
+        $ProjectRoot,
+        'Packages\com.echo.harness\Runtime\Bootstrap\HarnessLifetimeScope.cs'))
+Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<HarnessSessionDriver>') `
+    'HarnessLifetimeScope must register the session driver as an entry point.'
+Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<SessionFaultRouterEntryPoint>') `
+    'HarnessLifetimeScope must register the fault router entry point, or no fault is ever read.'
 
 $Contract = Get-Content -Raw -LiteralPath (
     Join-Path $ProjectRoot 'Packages\com.echo.harness\Fixtures\protocol.contract.json') |

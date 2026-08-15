@@ -2,7 +2,7 @@
   "name": "com.echo.harness",
   "version": "0.1.0",
   "displayName": "Echo Migration Harness",
-  "description": "Architecture contracts, deterministic test doubles, and verification seams for the Echo Unity migration. Contains no game implementation.",
+  "description": "Architecture contracts, deterministic test doubles, and verification seams for the Echo Unity migration, now carrying a login use case, view-model, view and screen. Contains no gameplay implementation.",
   "unity": "6000.2",
   "license": "UNLICENSED",
   "author": {
