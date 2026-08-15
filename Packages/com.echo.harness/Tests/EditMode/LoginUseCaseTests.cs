@@ -136,10 +136,14 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(session.RequestCount, Is.Zero);
         }
 
-        // The reconnect token is read from the response and dropped. This is a
-        // structural guard rather than a behaviour test: the failure it prevents is
-        // a future "helpful" addition of the field, which no behavioural test would
-        // notice.
+        // The reconnect token is never read from the response at all - "dropped"
+        // would imply it was looked at first. This is a structural guard rather
+        // than a behaviour test: it pins that LoginOutcome carries no property
+        // with "Token" in its name, so it never touches LoginUseCase itself and
+        // would pass just as well if a static field or a log line held the
+        // token somewhere. The failure it actually prevents is a future
+        // "helpful" addition of the field to LoginOutcome, which no behavioural
+        // test would notice.
         [Test]
         public void TheReconnectTokenNeverLeavesTheUseCase()
         {

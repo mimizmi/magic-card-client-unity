@@ -5,9 +5,13 @@ namespace Echo.Harness.Bootstrap
 {
     /// <summary>
     /// The app root scope, and the only one this iteration builds. Session and
-    /// scene scopes are deferred: with one scene and no login flow, a child scope
-    /// with one child and a lifetime identical to its parent is ceremony. See the
-    /// design spec for the reasoning.
+    /// scene scopes are deferred: the login screen never goes away, so a child
+    /// scope today would have a lifetime identical to its parent - ceremony,
+    /// not structure. Two events force the decision later, not on a schedule:
+    /// the first screen destroyed while the app keeps running forces a UI
+    /// scope, and the first flow that must survive a logout without reusing
+    /// the same <c>ProtocolSession</c> forces a session scope. See
+    /// <c>docs/migration-checklist.md</c> for the fuller reasoning.
     ///
     /// <para><b>No serialized reference to the endpoint asset, deliberately.</b>
     /// <c>HarnessComposition.Configure(builder)</c> resolves the endpoint through

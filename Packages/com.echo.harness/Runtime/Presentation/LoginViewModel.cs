@@ -137,7 +137,13 @@ namespace Echo.Harness.Presentation
             }
             catch (OperationCanceledException)
             {
-                // Shutdown. Nothing to show, and the screen is going away.
+                // Unreachable today: this call passes CancellationToken.None, so
+                // nothing here can actually cancel. The catch exists for the
+                // caller docs/migration-checklist.md's open item "Prove
+                // cancellation from view -> session -> transport" describes -
+                // once a live token replaces None, its cancellation must read as
+                // "nothing to show, the screen is going away" rather than a
+                // failed login the user might act on.
                 resultText = string.Empty;
             }
             catch (Exception failure)

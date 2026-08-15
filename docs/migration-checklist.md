@@ -247,8 +247,9 @@ deliverable.
   and `GoServerEndToEndTests.LoginOverARealSocketReturnsATypedResponse` already
   proved the wire. What this iteration added is `LoginUseCase` and the
   Application-level `LoginOutcome` that Presentation can actually see. **Not
-  closed by it:** `LoginResponseDto.ReconnectToken` is read and dropped. There is
-  no persistence and no reconnect path, and `LoginOutcome` carries no token field —
+  closed by it:** `LoginResponseDto.ReconnectToken` is never read at all - not
+  read and dropped, simply unused. There is no persistence and no reconnect
+  path, and `LoginOutcome` carries no token field —
   `LoginUseCaseTests.TheReconnectTokenNeverLeavesTheUseCase` keeps it that way
   until someone builds the storage decision that goes with it.
 - [x] Build one UI Toolkit view/view-model pair without infrastructure access.

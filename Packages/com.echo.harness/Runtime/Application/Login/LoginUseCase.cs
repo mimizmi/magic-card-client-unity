@@ -11,11 +11,15 @@ namespace Echo.Harness.Application
     /// <para><b>The exception policy is the design, and it has one rule:</b> this
     /// converts outcomes of trying to log in, and does not convert the system
     /// being broken. A timeout and a duplicate request are outcomes - the attempt
-    /// finished, badly. A cancellation is not: the only thing that cancels here is
-    /// shutdown, and reporting a quit as a failed login would be a lie the user
-    /// acts on. Anything else is a real failure and is left to escape, because a
-    /// broken transport dressed up as a clean refusal sends whoever debugs it to
-    /// the wrong layer.</para>
+    /// finished, badly. A cancellation is not, and is left to escape rather than
+    /// converted - though nothing reaches that path today, since the caller
+    /// passes <c>CancellationToken.None</c>. The guard is for the caller
+    /// docs/migration-checklist.md's open item "Prove cancellation from view ->
+    /// session -> transport" describes: once a live token exists, reporting its
+    /// cancellation as a failed login would be a lie the user acts on. Anything
+    /// else is a real failure and is left to escape too, because a broken
+    /// transport dressed up as a clean refusal sends whoever debugs it to the
+    /// wrong layer.</para>
     ///
     /// <para>The cost is real and is paid in <c>LoginViewModel</c>: because two
     /// exception classes escape, the caller needs a catch-all. That is deliberate,
@@ -26,8 +30,12 @@ namespace Echo.Harness.Application
     {
         /// <summary>
         /// How long the server gets to answer. Chosen to match
-        /// <c>ProtocolSession.RoundTripProbeDeadline</c>, which is the only other
-        /// deadline in the repository measured against this same server.
+        /// <c>ProtocolSession.RoundTripProbeDeadline</c>: both time a single
+        /// request waiting on one specific reply from this server, which is why
+        /// they share a value. Not the only timeout in the repository -
+        /// <c>ProtocolSession.DisposeDisconnectDeadline</c> and
+        /// <c>TcpTransportOptions.ReadIdleTimeout</c> are two more, timing
+        /// different things - but the only other one shaped like this one.
         /// </summary>
         public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
@@ -67,11 +75,17 @@ namespace Echo.Harness.Application
                 return LoginOutcome.NoReply("A login is already in flight.");
             }
 
-            // response.ReconnectToken is deliberately not carried out of this
-            // method. Persisting it is its own piece of work with its own storage
-            // question, and a token held in memory with no reader would be a
-            // speculative store that later reads as an implemented feature.
-            // LoginUseCaseTests.TheReconnectTokenNeverLeavesTheUseCase pins it.
+            // response.ReconnectToken is never read here at all - not read and
+            // dropped, simply unused. Persisting it is its own piece of work
+            // with its own storage question, and a token held in memory with no
+            // reader would be a speculative store that later reads as an
+            // implemented feature.
+            // LoginUseCaseTests.TheReconnectTokenNeverLeavesTheUseCase is a
+            // structural check on LoginOutcome's shape, not a behavioural one:
+            // it confirms LoginOutcome carries no property with "Token" in its
+            // name. A static field or a log line elsewhere would satisfy it
+            // just as well - it does not, and cannot, prove this method never
+            // reads the DTO field.
             return response.Success
                 ? LoginOutcome.Success(response.PlayerId, response.InGame)
                 : LoginOutcome.Refusal(

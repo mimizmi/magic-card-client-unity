@@ -13,13 +13,15 @@ namespace Echo.Harness.Application
     ///
     /// <para><b>The two halves have different threading on purpose, and that is
     /// the design rather than an inconsistency.</b> Logging is synchronous, on
-    /// whichever thread published the fault: <c>Debug</c> is safe from
-    /// any thread, and fault logs matter most on the shutdown path - the one
-    /// <c>HarnessSessionDriver</c> documents as having no further player-loop tick,
-    /// where anything that hopped first would never be emitted at all. UI delivery
-    /// does hop, through <see cref="ISessionScheduler"/>, because a handler that
-    /// touches UI on a pool thread is a crash; that is the review finding this
-    /// class closes.</para>
+    /// whichever thread published the fault. That is safe only because
+    /// <see cref="IFaultLog"/>'s implementation is relied upon, not documented,
+    /// to serialise its calls to <c>Debug</c> internally - Unity documents
+    /// nothing about which threads may call it. Fault logs matter most on the
+    /// shutdown path - the one <c>HarnessSessionDriver</c> documents as having
+    /// no further player-loop tick, where anything that hopped first would
+    /// never be emitted at all. UI delivery does hop, through
+    /// <see cref="ISessionScheduler"/>, because a handler that touches UI on a
+    /// pool thread is a crash; that is the review finding this class closes.</para>
     ///
     /// <para><b>Nothing here may rely on an exception escaping.</b>
     /// <c>ProtocolSession.PublishFault</c> catches everything a handler throws and
@@ -159,8 +161,12 @@ namespace Echo.Harness.Application
             catch (Exception failure)
             {
                 // SubscriberFailure rather than DispatchFailure: this is the
-                // delivery failing, not the session's dispatch. Written straight to
-                // the log rather than back through OnFault, which would recurse.
+                // delivery failing, not the session's dispatch. Written straight
+                // to the log rather than back through OnFault - not because that
+                // would recurse (SubscriberFailure is never a connection fault,
+                // so OnFault would log it and stop there), but because routing
+                // it back through the same dispatch would only add indirection
+                // for no functional difference.
                 log.Write(FaultSeverity.Warning, new SessionFault(
                     SessionFaultKind.SubscriberFailure,
                     fault.MessageId,
