@@ -37,7 +37,13 @@ namespace Echo.Harness.Application
         private readonly HashSet<MessageId> reportedNoDestination = new HashSet<MessageId>();
         private readonly List<Action<SessionFault>> connectionObservers =
             new List<Action<SessionFault>>();
-        private bool disposed;
+        // volatile because the disposed guards in OnFault and in the resumed half
+        // of DeliverToObserversAsync are justified by a scheduler whose hop and a
+        // concurrent Dispose() run on different threads - and a plain bool gives
+        // that reader no visibility guarantee at all under the C# memory model,
+        // only the accident that desktop x64 usually behaves. IL2CPP on ARM,
+        // which this project ships for, does not owe us that accident.
+        private volatile bool disposed;
 
         public SessionFaultRouter(
             IProtocolSession session,
