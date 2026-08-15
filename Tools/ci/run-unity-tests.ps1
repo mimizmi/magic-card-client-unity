@@ -44,10 +44,12 @@ $SanctionedSkipClass = 'Echo.Harness.Tests.EditMode.GoServerEndToEndTests'
 # not a pass. A machine with no ECHO_SERVER_HOST is also permanently in the skip
 # state, which is precisely the state that check exists to police.
 #
-# "Configured to take" is meant literally and is not the same as "runs": the
-# unity-tests job needs a self-hosted runner that has never existed, so this batch
-# path has never executed in CI. docs/verification-matrix.md carries the evidence
-# under "CI boundary".
+# "Configured to take" was long meant literally, and it is not the same as "runs":
+# the unity-tests job needs a self-hosted runner, and for most of this repository's
+# history none was registered, so this batch path never executed in CI once. A
+# runner carrying the required labels is registered now, and the job no longer sits
+# behind `workflow_dispatch`. docs/verification-matrix.md carries both the history
+# and the current arrangement under "CI boundary".
 #
 # $Summary must expose total/passed/failed/skipped/inconclusive; $Results must be
 # one row per test with FullName, Status and Message. Both runners are adapted to
