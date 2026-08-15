@@ -91,7 +91,7 @@ $ExpectedPins = [ordered]@{
     'com.unity.test-framework' = '1.6.0'
     'com.unity.test-framework.performance' = '3.2.0'
     'jp.hadashikick.vcontainer' = 'https://github.com/hadashiA/VContainer.git?path=VContainer/Assets/VContainer#1.19.0'
-    'com.unity.pipeline' = '0.4.0-exp.1'
+    'com.unity.pipeline' = '0.5.0-exp.1'
 }
 
 foreach ($Package in $ExpectedPins.GetEnumerator()) {

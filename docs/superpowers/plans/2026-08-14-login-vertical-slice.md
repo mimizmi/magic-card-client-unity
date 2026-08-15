@@ -99,7 +99,7 @@ Add to `Packages/com.echo.harness/Tests/EditMode/CompositionSmokeTests.cs`, next
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.CompositionSmokeTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.CompositionSmokeTests`.
 
 Expected: FAIL — compile error, `ISessionStatus` does not exist.
 
@@ -172,7 +172,7 @@ to:
 
 - [ ] **Step 6: Run the test and verify it passes**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.CompositionSmokeTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.CompositionSmokeTests`.
 
 Expected: PASS, including the pre-existing tests in that fixture.
 
@@ -496,7 +496,7 @@ namespace Echo.Harness.Tests.EditMode
 
 - [ ] **Step 3: Run the tests and verify they fail**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.LoginUseCaseTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.LoginUseCaseTests`.
 
 Expected: FAIL — compile error, `LoginUseCase`, `LoginOutcome` and `LoginResult` do not exist.
 
@@ -673,7 +673,7 @@ namespace Echo.Harness.Application
 
 - [ ] **Step 7: Run the tests and verify they pass**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.LoginUseCaseTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.LoginUseCaseTests`.
 
 Expected: PASS, 9 tests.
 
@@ -979,7 +979,7 @@ namespace Echo.Harness.Tests.EditMode
 
 - [ ] **Step 4: Run the tests and verify they fail**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.SessionFaultRouterTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.SessionFaultRouterTests`.
 
 Expected: FAIL — compile error, `SessionFaultRouter` does not exist.
 
@@ -1184,7 +1184,7 @@ namespace Echo.Harness.Application
 
 - [ ] **Step 6: Run the tests and verify they pass**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.SessionFaultRouterTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.SessionFaultRouterTests`.
 
 Expected: PASS, 13 tests.
 
@@ -1246,7 +1246,7 @@ Add to `Packages/com.echo.harness/Tests/EditMode/CompositionSmokeTests.cs`:
 
 - [ ] **Step 2: Run it and verify it fails**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.CompositionSmokeTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.CompositionSmokeTests`.
 
 Expected: FAIL — `VContainerException: No such registration of type: Echo.Harness.Application.IFaultLog`.
 
@@ -1308,7 +1308,7 @@ In `Packages/com.echo.harness/Runtime/Bootstrap/HarnessComposition.cs`, after th
 
 - [ ] **Step 5: Run the test and verify it passes**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.CompositionSmokeTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.CompositionSmokeTests`.
 
 Expected: PASS.
 
@@ -1654,7 +1654,7 @@ namespace Echo.Harness.Tests.EditMode
 
 - [ ] **Step 3: Run the tests and verify they fail**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode -Filter Echo.Harness.Tests.EditMode.LoginViewModelTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.EditMode.LoginViewModelTests`.
 
 Expected: FAIL — compile error, `LoginViewModel` does not exist.
 
@@ -1917,7 +1917,7 @@ to:
 
 - [ ] **Step 8: Run the tests and the gate**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform EditMode`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform`; it always runs EditMode then PlayMode.
 
 Expected: the whole EditMode suite passes, including `ThirdPartyPackageSmokeTests` and `HarnessPlayerLoopTests`' R3 usage, which are unaffected.
 
@@ -2030,7 +2030,7 @@ namespace Echo.Harness.Tests.PlayMode
 
 - [ ] **Step 4: Run it and verify it fails**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform PlayMode -Filter Echo.Harness.Tests.PlayMode.LoginViewTests`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform` or `-Filter`; it always runs EditMode then PlayMode. This step's target is `Echo.Harness.Tests.PlayMode.LoginViewTests`.
 
 Expected: FAIL — compile error until Task 5's types resolve; if Task 5 is complete, this may already pass, in which case confirm it fails when `Describe(SessionState.Connected)` is temporarily changed, then restore.
 
@@ -2111,7 +2111,7 @@ In the Unity Editor, open `Assets/Scenes/Bootstrap.unity`:
 
 - [ ] **Step 8: Run the PlayMode suite**
 
-Run: `pwsh Tools/ci/run-unity-tests.ps1 -Platform PlayMode`
+Run: `pwsh Tools/ci/run-unity-tests.ps1` — the script takes no `-Platform`; it always runs EditMode then PlayMode.
 
 Expected: PASS. If the only failure is `MainThreadSessionSchedulerTests.SwitchingFromAThreadPoolThreadReachesTheMainThread`, re-run — that test is intermittently red for reasons unrelated to this work; see the Global Constraints.
 

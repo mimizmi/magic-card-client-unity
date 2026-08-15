@@ -349,22 +349,36 @@ instance. Otherwise it uses hidden batchmode and writes NUnit XML.
 
 ## CI boundary
 
-**CI runs the architecture gate only. The Unity suite is a local gate, not a CI
-gate.** That is stated first because the version of this section that stood until
-now described an arrangement which had never once worked.
+**CI runs the architecture gate on hosted infrastructure and the Unity suite on a
+self-hosted runner.** For most of this repository's history the second half did not
+exist, and the version of this section that stood until then described an
+arrangement which had never once worked. That history is kept below, because it is
+why the arrangement is now described this precisely.
 
 `.github/workflows/unity-tests.yml` declares two jobs:
 
 - **`architecture`** runs `verify-architecture.ps1` on GitHub's hosted
   `windows-latest`. It needs no runner registration, no Unity licence and no
-  secrets, and it is the only check a pull request receives.
+  secrets.
 - **`unity-tests`** runs EditMode and PlayMode on the batch path
   (`-PreferConnectedEditor:$false`) and requires a runner labelled
   `[self-hosted, Windows, unity-6000.2.7f2]`, so that the exact licensed editor
-  revision is controlled. **No such runner is registered on this repository.** The
-  job is therefore gated behind `workflow_dispatch` and does not run on pull
-  requests. To promote it back into the gate, register a runner carrying those three
-  labels and delete the `if:`.
+  revision is controlled. A runner carrying those labels is registered, the `if:`
+  gate is gone, and the job runs on pull requests and pushes. Two things it depends
+  on are configuration rather than code, so they are recorded here: the repository
+  variable `UNITY_EDITOR_PATH_6000_2_7F2` supplies the editor path, and the runner
+  service must run as a user account holding the Unity licence — the licence is
+  activated per user, so a service running as `NETWORK SERVICE` cannot see it and
+  the editor fails to start at all.
+
+**The runner is self-hosted and this repository is public.** A fork's pull request
+would otherwise execute arbitrary code on the owner's machine, so Actions must keep
+"Require approval for all outside collaborators" or stricter. That setting is part
+of this gate, not optional hardening.
+
+The workspace is checked out with `clean: false`. `Library/` is gitignored, so the
+default `git clean -ffdx` would delete it and force a full asset reimport — minutes,
+against a suite that takes about one — on every run.
 
 Before production, pin third-party GitHub Actions to reviewed commit SHAs.
 

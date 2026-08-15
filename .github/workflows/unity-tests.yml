@@ -28,28 +28,37 @@ jobs:
         shell: pwsh
         run: ./Tools/ci/verify-architecture.ps1
 
-  # Opt-in, and deliberately NOT part of the pull-request gate.
+  # Part of the pull-request gate, as of the runner registration described below.
   #
-  # This job needs a runner labelled [self-hosted, Windows, unity-6000.2.7f2]. No
-  # such runner is registered on this repository -- the runner count is zero -- so
-  # from the first commit until this comment it could never start. It sat
-  # permanently "skipped" behind a failing `needs: architecture`, and a skipped
-  # check reads on a pull request very much like one that ran and passed. Making
-  # it manual-only is the honest state: the checks list no longer implies a Unity
-  # suite that CI has never once executed.
+  # This job needs a runner labelled [self-hosted, Windows, unity-6000.2.7f2]. For
+  # most of this repository's history no such runner existed -- the count was zero
+  # -- so the job could never start. It sat permanently "skipped", and a skipped
+  # check reads on a pull request very much like one that ran and passed, which is
+  # why it was made manual-only rather than left looking green.
   #
-  # docs/verification-matrix.md is the authority on what that costs -- the Unity
-  # suite is a LOCAL gate, not a CI gate. To promote it back to a CI gate, register
-  # a runner carrying those three labels and delete the `if:` below; nothing else
-  # here needs to change.
+  # A self-hosted runner now carries those labels, so the `if:` is gone and the job
+  # runs on every pull request and push. See "CI boundary" in
+  # docs/verification-matrix.md for what that changes.
+  #
+  # SECURITY: this repository is public and the runner is self-hosted, so a fork's
+  # pull request would otherwise execute arbitrary code on the owner's machine.
+  # Actions must keep "Require approval for all outside collaborators" (or
+  # stricter) enabled in repository settings. Do not relax that while this job
+  # triggers on `pull_request`.
   unity-tests:
     needs: architecture
-    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Windows, unity-6000.2.7f2]
-    timeout-minutes: 20
+    # A fresh workspace imports every asset first -- this project carries XLua's
+    # native plugins for four platforms -- which costs far more than the ~1 minute
+    # the suite itself takes. Later runs reuse Library.
+    timeout-minutes: 45
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          # Library/ is gitignored, so the default `clean: true` (git clean -ffdx)
+          # deletes it and forces a full reimport on every run.
+          clean: false
 
       - name: Install pinned NuGetForUnity CLI
         shell: pwsh

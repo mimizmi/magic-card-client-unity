@@ -45,13 +45,21 @@ deliverable.
   not that the constant is still true. Nobody re-checks the constant itself against
   what the package actually contains. Someone should either narrow the sentence or
   define "game implementation" precisely enough that a login screen falls outside it.
-- [ ] Assign real CODEOWNERS teams in `.github/CODEOWNERS`.
+- [ ] Replace the CODEOWNERS placeholders in `.github/CODEOWNERS`. They are written as
+  organisation teams (`@echo-game/client-maintainers` and two others), and this
+  repository is owned by a **user account**, not an organisation. Teams cannot exist
+  under a user account, so every one of those references is unresolvable as written —
+  the file has never assigned an owner to anything. Either name user accounts or delete
+  the file; CODEOWNERS review also does nothing until branch protection requires it.
 - [ ] Protect `master` with required architecture and Unity-test checks. The trunk is
   `master`, not `main`; the workflow's push trigger named `main` from the first commit
-  and therefore never fired once. Note the ordering this forces: the architecture check
-  can be made required as soon as it goes green, but the **Unity-test check cannot be
-  required until a self-hosted runner exists** — that job is manual-only today because
-  no runner is registered. See "CI boundary" in `docs/verification-matrix.md`.
+  and therefore never fired once, which is fixed. The ordering this item used to force
+  is resolved: a self-hosted runner labelled `[self-hosted, Windows, unity-6000.2.7f2]`
+  is registered, so both checks are candidates to be required. What remains is the
+  repository-settings half — marking them required, and keeping Actions at "Require
+  approval for all outside collaborators", which a public repository with a self-hosted
+  runner needs rather than merely benefits from. See "CI boundary" in
+  `docs/verification-matrix.md`.
 
 ## Phase 1 — production infrastructure
 
