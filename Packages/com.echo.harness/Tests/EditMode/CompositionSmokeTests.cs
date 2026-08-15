@@ -2,6 +2,7 @@ using System;
 using Echo.Harness.Application;
 using Echo.Harness.Bootstrap;
 using Echo.Harness.Infrastructure;
+using Echo.Harness.Presentation;
 using NUnit.Framework;
 using VContainer;
 
@@ -360,6 +361,10 @@ namespace Echo.Harness.Tests.EditMode
                 container.Resolve<SessionFaultRouter>(),
                 Is.SameAs(container.Resolve<SessionFaultRouter>()),
                 "Two routers would mean two subscriptions and every fault logged twice.");
+            Assert.That(
+                container.Resolve<LoginViewModel>(),
+                Is.Not.Null,
+                "HarnessComposition registers LoginViewModel; registering is not resolving.");
         }
     }
 }

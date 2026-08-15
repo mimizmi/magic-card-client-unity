@@ -1,0 +1,29 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements">
+    <ui:VisualElement name="login-root" style="padding: 24px; max-width: 420px;">
+        <ui:Label name="connection-status">
+            <Bindings>
+                <ui:DataBinding property="text" data-source-path="ConnectionStatus" binding-mode="ToTarget" />
+            </Bindings>
+        </ui:Label>
+        <ui:TextField name="player-name" label="Player name">
+            <Bindings>
+                <ui:DataBinding property="value" data-source-path="PlayerName" binding-mode="TwoWay" />
+            </Bindings>
+        </ui:TextField>
+        <ui:Button name="submit" text="Log in">
+            <Bindings>
+                <ui:DataBinding property="enabledSelf" data-source-path="CanSubmit" binding-mode="ToTarget" />
+            </Bindings>
+        </ui:Button>
+        <ui:Label name="result" style="white-space: normal;">
+            <Bindings>
+                <ui:DataBinding property="text" data-source-path="ResultText" binding-mode="ToTarget" />
+            </Bindings>
+        </ui:Label>
+        <ui:Label name="connection-fault" style="white-space: normal;">
+            <Bindings>
+                <ui:DataBinding property="text" data-source-path="ConnectionFaultText" binding-mode="ToTarget" />
+            </Bindings>
+        </ui:Label>
+    </ui:VisualElement>
+</ui:UXML>

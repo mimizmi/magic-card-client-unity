@@ -28,6 +28,8 @@ namespace Echo.Harness.Bootstrap
             // Not decoration. See SessionFaultRouterEntryPoint: without this line
             // the router is registered and never constructed, and nothing fails.
             builder.RegisterEntryPoint<SessionFaultRouterEntryPoint>();
+
+            builder.RegisterComponentInHierarchy<LoginView>();
         }
     }
 }
