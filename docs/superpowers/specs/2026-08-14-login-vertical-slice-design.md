@@ -408,6 +408,18 @@ view-model test fails rather than only the manual run; and delete the
 `RegisterEntryPoint<SessionFaultRouterEntryPoint>` line and confirm a test fails
 rather than the suite staying green over a sink that is never constructed.
 
+> **Measured afterwards: the second of those four predictions is now wrong, and is
+> left standing rather than corrected.** Breaking `.As<ISessionStatus>()` fails
+> **two** tests, not only the new composition assertion:
+> `HarnessComposition_ExposesOneSessionThroughBothInterfaces` as predicted, and
+> `HarnessComposition_ResolvesTheFaultSinkAndTheLoginUseCase` as collateral,
+> because resolving `LoginViewModel` needs `ISessionStatus` too. The prediction was
+> accurate when written — this slice's own `LoginViewModel` is what falsified it.
+> The number is deliberately not edited to match: a spec quietly rewritten to agree
+> with the measurement destroys the evidence that the premise moved, which is the
+> one thing this record is for. `docs/verification-matrix.md` carries the measured
+> result.
+
 ## Out of scope
 
 - Reconnect, token persistence, and the reconnect path through `LoginRequestDto.ReconnectToken`.
