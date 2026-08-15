@@ -65,6 +65,25 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         [Test]
+        public void IsConnectedTracksSessionStateAcrossRefresh()
+        {
+            status.State = SessionState.Connecting;
+            viewModel.Refresh();
+
+            Assert.That(viewModel.IsConnected, Is.False);
+
+            status.State = SessionState.Connected;
+            viewModel.Refresh();
+
+            Assert.That(viewModel.IsConnected, Is.True);
+
+            status.State = SessionState.Faulted;
+            viewModel.Refresh();
+
+            Assert.That(viewModel.IsConnected, Is.False);
+        }
+
+        [Test]
         public void RefreshRaisesNothingWhenNothingChanged()
         {
             status.State = SessionState.Connected;

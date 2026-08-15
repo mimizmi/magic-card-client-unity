@@ -79,6 +79,16 @@ namespace Echo.Harness.Presentation
             && !busy
             && !string.IsNullOrWhiteSpace(playerName);
 
+        /// <summary>
+        /// Connectedness alone, with no name or busy check mixed in. Exists so the
+        /// player-name field can be enabled once the session connects without
+        /// binding to <see cref="CanSubmit"/> - <c>CanSubmit</c> already requires a
+        /// non-blank name, so a field gated on it could never receive the very
+        /// keystrokes that would satisfy it.
+        /// </summary>
+        [CreateProperty]
+        public bool IsConnected => status.State == SessionState.Connected;
+
         [CreateProperty]
         public bool IsBusy => busy;
 
@@ -106,6 +116,7 @@ namespace Echo.Harness.Presentation
             connectionStatus = Describe(current);
             Notify(nameof(ConnectionStatus));
             Notify(nameof(CanSubmit));
+            Notify(nameof(IsConnected));
         }
 
         public async UniTask SubmitAsync()

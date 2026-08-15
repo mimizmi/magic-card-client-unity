@@ -63,6 +63,33 @@ namespace Echo.Harness.Tests.EditMode
             Assert.That(binding.dataSourcePath, Is.EqualTo(new PropertyPath("ConnectionStatus")));
         }
 
+        // The player-name field is disabled until the session connects - see
+        // LoginViewModel.IsConnected - and it must still bind its value two-way
+        // for typing to reach the view-model at all. Both bindings live on one
+        // element, so a test pinning only one of them would miss a regression
+        // that silently dropped the other.
+        [Test]
+        public void ThePlayerNameFieldCarriesTwoBindings()
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
+            var root = asset.Instantiate();
+
+            var field = root.Q<TextField>("player-name");
+            Assert.That(field, Is.Not.Null);
+
+            var valueBinding = field.GetBinding("value");
+            Assert.That(valueBinding, Is.Not.Null, "'player-name' has no DataBinding on 'value'.");
+
+            var enabledBinding = field.GetBinding("enabledSelf");
+            Assert.That(
+                enabledBinding,
+                Is.Not.Null,
+                "'player-name' has no DataBinding on 'enabledSelf'.");
+            Assert.That(
+                ((DataBinding)enabledBinding).dataSourcePath,
+                Is.EqualTo(new PropertyPath("IsConnected")));
+        }
+
         private static void AssertBound(VisualElement root, string elementName, string property)
         {
             var element = root.Q(elementName);

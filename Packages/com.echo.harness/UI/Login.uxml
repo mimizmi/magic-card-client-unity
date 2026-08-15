@@ -1,26 +1,27 @@
-<ui:UXML xmlns:ui="UnityEngine.UIElements">
-    <ui:VisualElement name="login-root" style="padding: 24px; max-width: 420px;">
-        <ui:Label name="connection-status">
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="False">
+    <ui:VisualElement name="login-root" style="padding: 24px; max-width: 100%; justify-content: flex-start; align-items: stretch; align-self: stretch; align-content: flex-start; width: 100%; height: 100%; max-height: 100%;">
+        <ui:Label name="connection-status" style="width: 500px; height: 100px; font-size: 34px; -unity-text-align: middle-center; -unity-font-style: bold; left: 25%;">
             <Bindings>
                 <ui:DataBinding property="text" data-source-path="ConnectionStatus" binding-mode="ToTarget" />
             </Bindings>
         </ui:Label>
-        <ui:TextField name="player-name" label="Player name">
+        <ui:TextField name="player-name" label="Player name" style="font-size: 30px;">
             <Bindings>
                 <ui:DataBinding property="value" data-source-path="PlayerName" binding-mode="TwoWay" />
+                <ui:DataBinding property="enabledSelf" data-source-path="IsConnected" binding-mode="ToTarget" />
             </Bindings>
         </ui:TextField>
-        <ui:Button name="submit" text="Log in">
+        <ui:Button name="submit" text="Log in" style="font-size: 30px;">
             <Bindings>
                 <ui:DataBinding property="enabledSelf" data-source-path="CanSubmit" binding-mode="ToTarget" />
             </Bindings>
         </ui:Button>
-        <ui:Label name="result" style="white-space: normal;">
+        <ui:Label name="result" style="white-space: normal; font-size: 30px; -unity-text-align: middle-center; -unity-font-style: bold;">
             <Bindings>
                 <ui:DataBinding property="text" data-source-path="ResultText" binding-mode="ToTarget" />
             </Bindings>
         </ui:Label>
-        <ui:Label name="connection-fault" style="white-space: normal;">
+        <ui:Label name="connection-fault" style="white-space: normal; font-size: 30px; -unity-font-style: bold; -unity-text-align: middle-center;">
             <Bindings>
                 <ui:DataBinding property="text" data-source-path="ConnectionFaultText" binding-mode="ToTarget" />
             </Bindings>
