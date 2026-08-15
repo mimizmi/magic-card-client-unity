@@ -54,7 +54,7 @@ drift gate itself, they are **enforced locally, not in CI** — CI invokes
 ## Transport and session properties
 
 Each row is a property the transport or the session now guarantees, and the test
-that would fail if it stopped holding. Six of them are marked **mutation-verified**:
+that would fail if it stopped holding. Ten of them are marked **mutation-verified**:
 the property was removed from the production code and the test was confirmed to
 fail, because each is the kind of claim a test can assert while passing for an
 unrelated reason. The count was two until the shutdown latch's process-wide arming
@@ -64,7 +64,9 @@ fifth, and the fifth is the same story again: the three composition tests the pl
 specified all stayed green with the configured endpoint dropped on the floor. The
 sixth is the composed-graph end-to-end row, and it was measured the same way — twice,
 once by deleting a registration and once by dropping the endpoint, with its three
-hand-built siblings green through both.
+hand-built siblings green through both. The login slice added four more: the fault
+router's UI hop, the fault sink's entry-point registration, the login screen's
+`CanSubmit` gate, and the login layout's declared bindings.
 
 | Property | Enforced by | What would otherwise pass unnoticed |
 |---|---|---|
@@ -82,6 +84,11 @@ hand-built siblings green through both.
 | Our reading of the protocol matches the server's | `GoServerEndToEndTests` (EditMode; three of its four tests) | Field names, framing, and the heartbeat reply, all against the authoritative Go server over a real socket. The reply is counted at the transport after the write returned; see below for why nothing else can see it. |
 | The graph the composition root builds is one that actually talks to the server | `GoServerEndToEndTests.TheComposedGraphConnectsAndProbes` (EditMode) | **Mutation-verified, twice.** The other three end-to-end tests construct their transport, session, clock and scheduler by hand, so all three stay green with `HarnessComposition.Configure` broken — which is the whole reason this fourth one exists. Measured: deleting the `ProtocolSession` registration killed only this test, at `Resolve`, with `VContainerException: No such registration of type: IProtocolSession`; and making the registered `TcpTransportOptions` ignore the configured endpoint and keep the loopback defaults killed only this test again, at connect, with a refused-connection `SocketException`. It is the only test in the repository that fails because the *wiring* is wrong rather than because the *protocol* is. What it does not cover is the entry point: `HarnessLifetimeScope` registers `HarnessSessionDriver` on top of `Configure`, and that half belongs to the PlayMode driver tests. |
 | A driver starts the session when an endpoint is configured, stays quiet when one is not, and finishes its shutdown without needing a frame | `HarnessSessionDriverTests` (PlayMode, six tests, against a fake transport) | An entry point that started nothing, or one whose shutdown returned a `UniTask` still pending when a quit hook already had no frame left to give it. The last of those is asserted rather than assumed, because a transport with a genuinely asynchronous close is a legitimate future change and must produce a warning rather than a session that is never stopped. |
+| A login response becomes something Presentation can act on, and a broken transport is not disguised as a refusal | `LoginUseCaseTests` (9 tests) | The exception policy is the design: a timeout and a duplicate request become `NoAnswer` because the attempt finished badly, while cancellation and everything else escape. `TheReconnectTokenNeverLeavesTheUseCase` is structural rather than behavioural — the failure it prevents is a future helpful addition of the field, which no behavioural test would notice. |
+| Faults reach a reader, once, on the right thread | `SessionFaultRouterTests` (12 tests) | **Mutation-verified.** Deleting the hop in the router's UI half fails `TheLogTakesNoHopAndTheObserverTakesOne`. Before this iteration nothing subscribed to `SubscribeToFaults` at all, so all seven kinds were produced and never read. The log deliberately does not hop and the UI delivery does; `NoDestination` is de-duplicated here rather than in `ProtocolSession`, whose contract of publishing every unrouted message is what makes a late subscription visible. |
+| The fault sink is constructed rather than merely registered | `verify-architecture.ps1` source assertion on `HarnessLifetimeScope.cs` | **Mutation-verified.** `SessionFaultRouter` subscribes in its constructor and every VContainer registration is lazy, so deleting the `RegisterEntryPoint<SessionFaultRouterEntryPoint>` line leaves a sink that never sees a fault with every test still green. **What this does not prove:** that VContainer runs the registration. It proves the line is present. No test on this runtime can prove the rest, for the same reason `HarnessSessionDriver`'s subscription cannot be asserted. |
+| The login screen shows connection state, and a dropped link does not erase a refusal | `LoginViewModelTests` (9 tests), `LoginViewTests` (PlayMode, 1 test) | **Mutation-verified.** Forcing `CanSubmit` to `true` fails two tests. `ResultText` and `ConnectionFaultText` are separate fields so that a fault arriving mid-read cannot overwrite the message the user is looking at. |
+| The login layout declares a real binding for every field, not just a path that never binds | `LoginLayoutTests` (4 tests) | **Mutation-verified.** Loads the real `Login.uxml` through `AssetDatabase` and asserts each of the five elements carries an actual `DataBinding`, not just a `data-source-path` attribute — which records where to look and never records what to bind, so an imported layout with none would still pass every other test in this table, because the PlayMode `LoginViewTests` binds a `Label` it builds by hand in C# and never opens the asset. Two of the four tests additionally pin the resolved `dataSourcePath` on the submit button and the status label, so a copy-pasted path is caught too. Deleting the submit button's `<Bindings>` block turns it red. **What it does not prove:** that the running screen displays anything — it proves the layout declares bindings, not that a panel renders them. |
 
 ### The two runners are graded by one function, with one difference
 
@@ -199,6 +206,19 @@ same reason: both need an endpoint CI does not have.
    does not hang on exit. No automated test loads that scene. Nothing in the gate runs
    it, nothing in the gate notices if it is never run again, and it needs a configured
    endpoint too.
+
+The manual acceptance check now has a second half, and it has the same standing as
+the first: **nothing in the gate runs it, and nothing notices if it is never run
+again.** With an endpoint configured, open `Assets/Scenes/Bootstrap.unity` and press
+Play; the status label must reach "Connected.", the login button must be unusable
+before that, a submitted name must return a real `player_id` from the Go server, and
+leaving play mode must log no error and no unexplained `SessionFault`. No automated
+test loads that scene, and the end-to-end tier that could check the wire half skips
+itself on any machine without an endpoint. `LoginLayoutTests` already covers whether
+`Login.uxml` declares a binding for each field, so that is not what this check is
+for — what remains genuinely manual is the rest: that a panel actually renders on
+screen, that the states sequence correctly against a real connection, and that the
+console stays clean on the way out.
 
 So the scene, and the graph as a running thing rather than a resolvable one, are
 covered by a local run and a person — not by `verify.ps1` and not by CI.

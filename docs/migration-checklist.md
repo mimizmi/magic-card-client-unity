@@ -18,6 +18,33 @@ deliverable.
   deterministic fakes.
 - [x] Deterministic transport/content/Lua/time fakes.
 - [x] EditMode, PlayMode, static, local aggregate, and CI entry points.
+- [x] Keep migration code inside `Packages/com.echo.harness/`, and know why. Every
+  assembly this migration has produced — six runtime assemblies plus `TestKit` and
+  two test assemblies — lives in the embedded UPM package. The reason is
+  enforcement, not taste: `Tools/ci/verify-architecture.ps1` pins each runtime
+  assembly's reference list by exact set equality, and separately counts the
+  non-runtime asmdefs under the package so that, in the gate's own words, a new
+  assembly "must not arrive unexamined." That grip exists because the package is
+  one enumerable tree. `Assets/` is not empty and never was — it already holds the
+  legacy XLua stack (`Assets/XLua`, `Assets/Plugins` with native libs for
+  Android/WSA/WebGL/iOS), NuGet config, `Assets/Settings`, and `Assets/Scenes`; the
+  login slice added `Assets/UI` and the Unity-generated `Assets/UI Toolkit`. So the
+  working boundary today is: compiled migration code and its tests go in the
+  package; scenes, project-level assets, machine-local config, and the pre-existing
+  XLua stack stay in `Assets/`. **Where the game proper lands is undecided** — this
+  is a decision about migration-harness code only, not a rule for gameplay code.
+- [ ] Decide whether `package.json`'s self-description still holds. It says the
+  package "[c]ontains no game implementation," and that is now at least arguable:
+  the package contains a login use case, a view-model, a view, and a login screen.
+  Nothing checks the sentence against reality. `Tools/ci/verify-architecture.ps1`
+  does read `package.json`, but only to pin `.version` and `.unity`; it never looks
+  at `.description`. `Echo.Harness.Domain.HarnessPolicy.ContainsGameplayImplementation`
+  is `false` and is read by `HarnessComposition.Configure`, which copies it into a
+  `HarnessRuntimeDescriptor`, and `CompositionSmokeTests.HarnessComposition_ResolvesItsHealthDescriptor`
+  does assert that descriptor's value — but that only proves the copy is faithful,
+  not that the constant is still true. Nobody re-checks the constant itself against
+  what the package actually contains. Someone should either narrow the sentence or
+  define "game implementation" precisely enough that a login screen falls outside it.
 - [ ] Assign real CODEOWNERS teams in `.github/CODEOWNERS`.
 - [ ] Protect `master` with required architecture and Unity-test checks. The trunk is
   `master`, not `main`; the workflow's push trigger named `main` from the first commit
@@ -172,10 +199,12 @@ deliverable.
   exception, so the fact that the `finally` un-registered the gate entry off-context
   leaves a trace. A cancelled hop stays unreported deliberately, because the only thing
   that can cancel it is the scheduler's own shutdown latch and every ordinary quit would
-  otherwise publish a fault. **Who reads it is a separate question and the honest answer
-  today is nobody** — no production type subscribes to `SubscribeToFaults`, so the
-  publish reaches an empty handler list until a fault sink exists. That sink is unbuilt
-  and is the real remainder here.
+  otherwise publish a fault. **Who reads it is no longer nobody.** `SessionFaultRouter`
+  subscribes to `SubscribeToFaults` and writes every kind to the Unity console through
+  `IFaultLog`, so the fault this path publishes now leaves a trace a person can
+  find. The two connection kinds also reach the login screen. The five that do not
+  are logged and stop there, because no interface element could express them while
+  a login screen is the only screen.
 - [x] Guard `SendAsync` against a caller with no `SynchronizationContext`. Closed by
   passing `useCurrentSynchronizationContext: false` at every `Task`-to-`UniTask` boundary
   in `TcpTransport`: the write gate's `WaitAsync`, the stream's `FlushAsync`, and — found
@@ -195,13 +224,16 @@ deliverable.
   deliberately left open rather than ticked.** The app root scope exists —
   `HarnessLifetimeScope` on `Assets/Scenes/Bootstrap.unity`, which calls
   `HarnessComposition.Configure` and registers the session driver as its entry point.
-  Session and scene scopes are deferred to Phase 2: with one scene and no login flow, a
-  child scope with one child and a lifetime identical to its parent is ceremony, and a
-  login flow is what would give a session scope something to mean. The deferral is not
-  free and the cost is recorded where it bites: `CompositionSmokeTests` pins the session
-  as a `Singleton` and says in its own comment that the moment a child scope exists,
-  `Scoped` would give every scope its own `ProtocolSession` over its own `TcpTransport`.
-  Whoever adds the second scope must decide that, not inherit it.
+  The login slice did not change this, and the reason is now narrower rather than
+  restated: the login screen never goes away, so a child scope would have a
+  lifetime identical to its parent. **What has changed is that the deferral is no
+  longer open-ended.** Two events force the decision, and whoever hits either one
+  owns it: the first screen that is destroyed while the application keeps running
+  forces a UI scope, and the first flow that must survive a logout without reusing
+  the same `ProtocolSession` forces a session scope. Until one of those exists there
+  is nothing for a second scope to mean. `CompositionSmokeTests` still carries the
+  warning that matters on that day — with a child scope, `Scoped` would give every
+  scope its own `ProtocolSession` over its own `TcpTransport`.
 - [ ] Implement Addressables catalog environments, build profiles, release
   ownership, CDN credentials, rollback, and cache budgets.
 - [ ] Select, audit, pin, and import xLua only if hot-update requirements justify it.
@@ -210,8 +242,22 @@ deliverable.
 
 ## Phase 2 — vertical slice
 
-- [ ] Implement typed login DTOs and one login use case.
-- [ ] Build one UI Toolkit view/view-model pair without infrastructure access.
+- [x] Implement typed login DTOs and one login use case. The DTOs predate this
+  iteration — `LoginRequestDto`/`LoginResponseDto` landed with the contract typing,
+  and `GoServerEndToEndTests.LoginOverARealSocketReturnsATypedResponse` already
+  proved the wire. What this iteration added is `LoginUseCase` and the
+  Application-level `LoginOutcome` that Presentation can actually see. **Not
+  closed by it:** `LoginResponseDto.ReconnectToken` is read and dropped. There is
+  no persistence and no reconnect path, and `LoginOutcome` carries no token field —
+  `LoginUseCaseTests.TheReconnectTokenNeverLeavesTheUseCase` keeps it that way
+  until someone builds the storage decision that goes with it.
+- [x] Build one UI Toolkit view/view-model pair without infrastructure access.
+  `LoginViewModel` is in Presentation and reaches infrastructure through nothing:
+  it takes `ISessionStatus`, `ILoginUseCase` and `SessionFaultRouter`, all
+  Application types. The pair is split across two assemblies — the view is in
+  Bootstrap — because Presentation may not reference VContainer and so cannot carry
+  an `[Inject]` attribute. That cost was accepted rather than widening the
+  reference list; see the design spec.
 - [ ] Implement queue and match-found flow.
 - [ ] Start a local authoritative Go room and render one player-specific state.
 - [ ] Prove cancellation from view → session → transport.
