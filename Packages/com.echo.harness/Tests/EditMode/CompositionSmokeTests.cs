@@ -366,5 +366,41 @@ namespace Echo.Harness.Tests.EditMode
                 Is.Not.Null,
                 "HarnessComposition registers LoginViewModel; registering is not resolving.");
         }
+
+        // The queue half of the same check. MatchFoundWatcher subscribes to 2004 in
+        // its constructor, so the singleton identity below is not tidiness: two
+        // watchers would mean two subscriptions and every match handled twice.
+        [Test]
+        public void HarnessComposition_ResolvesTheQueueStack()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(container.Resolve<IQueueUseCase>(), Is.Not.Null);
+            Assert.That(
+                container.Resolve<MatchFoundWatcher>(),
+                Is.SameAs(container.Resolve<MatchFoundWatcher>()),
+                "Two watchers would mean two subscriptions to MatchFoundEvent.");
+            Assert.That(
+                container.Resolve<QueueViewModel>(),
+                Is.Not.Null,
+                "HarnessComposition registers QueueViewModel; registering is not resolving.");
+        }
+
+        // CurrentPlayer is registered in two roles and must be ONE object: the use
+        // case writes the concrete type and the view-model reads the interface, so
+        // two instances would leave the reader permanently logged out.
+        [Test]
+        public void HarnessComposition_ExposesOneCurrentPlayerThroughBothRoles()
+        {
+            var builder = new ContainerBuilder();
+            HarnessComposition.Configure(builder, EndpointResolution.NotConfigured("test"));
+            using var container = builder.Build();
+
+            Assert.That(
+                container.Resolve<ICurrentPlayer>(),
+                Is.SameAs(container.Resolve<CurrentPlayer>()));
+        }
     }
 }

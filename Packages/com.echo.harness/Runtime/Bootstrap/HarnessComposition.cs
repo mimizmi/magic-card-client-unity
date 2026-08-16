@@ -89,9 +89,26 @@ namespace Echo.Harness.Bootstrap
             builder.Register<UnityFaultLog>(Lifetime.Singleton).As<IFaultLog>();
             builder.Register<SessionFaultRouter>(Lifetime.Singleton);
 
+            // Two roles, ONE instance, for the same reason ProtocolSession above
+            // has two: LoginUseCase writes the concrete type and everything else
+            // reads the interface, and a second registration would give the writer
+            // and the readers different objects - a client permanently logged out
+            // as far as every reader could tell.
+            builder.Register<CurrentPlayer>(Lifetime.Singleton).AsSelf().As<ICurrentPlayer>();
+
             builder.Register<LoginUseCase>(Lifetime.Singleton).As<ILoginUseCase>();
 
+            builder.Register<QueueUseCase>(Lifetime.Singleton).As<IQueueUseCase>();
+
+            // Subscribes to 2004 in its constructor, so like SessionFaultRouter it
+            // must be RESOLVED and not merely registered. MatchFoundWatcherEntryPoint
+            // is what forces that; QueueViewModel taking one is ordinary consumption
+            // and is NOT a substitute, for the reason spelled out on
+            // SessionFaultRouterEntryPoint.
+            builder.Register<MatchFoundWatcher>(Lifetime.Singleton);
+
             builder.Register<LoginViewModel>(Lifetime.Singleton);
+            builder.Register<QueueViewModel>(Lifetime.Singleton);
         }
     }
 }

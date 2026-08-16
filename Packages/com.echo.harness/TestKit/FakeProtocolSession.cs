@@ -23,8 +23,20 @@ namespace Echo.Harness.TestKit
     {
         private readonly List<Action<SessionFault>> faultHandlers =
             new List<Action<SessionFault>>();
+        private readonly Dictionary<MessageId, List<Action<object>>> subscribers =
+            new Dictionary<MessageId, List<Action<object>>>();
 
         public SessionState State { get; set; } = SessionState.Disconnected;
+
+        /// <summary>
+        /// Every message handed to <see cref="SendAsync"/>, in order. Sends are the
+        /// only observable effect of a fire-and-forget message such as 2003
+        /// LeaveQueueRequest, which the server answers with nothing at all - so
+        /// without this, a use case that sent it and one that did nothing would be
+        /// indistinguishable.
+        /// </summary>
+        public List<(MessageId MessageId, object Payload)> SentMessages { get; } =
+            new List<(MessageId, object)>();
 
         /// <summary>What the next RequestAsync returns. Cast to TResponse.</summary>
         public object NextResponse { get; set; }
@@ -44,8 +56,25 @@ namespace Echo.Harness.TestKit
 
         public UniTask StopAsync(CancellationToken cancellationToken) => UniTask.CompletedTask;
 
-        public UniTask SendAsync(MessageId messageId, object payload, CancellationToken cancellationToken) =>
-            UniTask.CompletedTask;
+        public UniTask SendAsync(
+            MessageId messageId,
+            object payload,
+            CancellationToken cancellationToken)
+        {
+            SentMessages.Add((messageId, payload));
+
+            if (NextSendFailure != null)
+            {
+                var failure = NextSendFailure;
+                NextSendFailure = null;
+                return UniTask.FromException(failure);
+            }
+
+            return UniTask.CompletedTask;
+        }
+
+        /// <summary>One-shot. Cleared by the send that consumes it.</summary>
+        public Exception NextSendFailure { get; set; }
 
         public UniTask<TResponse> RequestAsync<TResponse>(
             MessageId requestId,
@@ -75,8 +104,80 @@ namespace Echo.Harness.TestKit
         public UniTask<TimeSpan> ProbeRoundTripAsync(CancellationToken cancellationToken) =>
             UniTask.FromResult(TimeSpan.Zero);
 
-        public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler) =>
-            new Unsubscribe(() => { });
+        /// <summary>
+        /// Records the handler and returns a live unsubscribe, where this used to
+        /// return a handle that unhooked nothing from a list that was never kept.
+        /// That no-op was harmless while nothing under test subscribed to anything;
+        /// it stopped being harmless with <c>MatchFoundWatcher</c>, whose entire
+        /// contract is about WHEN it subscribes and whether disposing it stops
+        /// delivery - both unobservable against a fake that discards the handler.
+        ///
+        /// <para>The two argument checks mirror <c>ProtocolSession.Subscribe</c>
+        /// rather than being defensive habit: a payload-shape "none" id and a
+        /// mismatched TPayload are the two ways a real subscription throws, and a
+        /// fake that accepted them would let a test pin a contract production does
+        /// not have.</para>
+        /// </summary>
+        public IDisposable Subscribe<TPayload>(MessageId messageId, Action<TPayload> handler)
+        {
+            if (handler == null)
+            {
+                throw new ArgumentNullException(nameof(handler));
+            }
+
+            if (!ProtocolMessageMap.PayloadTypes.TryGetValue(messageId, out var expectedType))
+            {
+                throw new ArgumentException(
+                    $"{messageId} carries no payload and cannot be subscribed to.",
+                    nameof(messageId));
+            }
+
+            if (expectedType != typeof(TPayload))
+            {
+                throw new ArgumentException(
+                    $"{messageId} carries {expectedType.Name}, not {typeof(TPayload).Name}.",
+                    nameof(TPayload));
+            }
+
+            if (!subscribers.TryGetValue(messageId, out var handlers))
+            {
+                handlers = new List<Action<object>>();
+                subscribers[messageId] = handlers;
+            }
+
+            Action<object> boxed = payload => handler((TPayload)payload);
+            handlers.Add(boxed);
+            return new Unsubscribe(() => handlers.Remove(boxed));
+        }
+
+        /// <summary>
+        /// Delivers a payload to whoever subscribed to <paramref name="messageId"/>,
+        /// the way the receive pump would.
+        ///
+        /// <para>Synchronous and on the caller's thread, matching
+        /// <c>ProtocolSession</c>'s dispatch after its single hop to the session
+        /// context - which is what lets a subscriber touch UI state without a
+        /// scheduler of its own. Unlike <see cref="PublishFault"/>, a handler
+        /// exception is NOT swallowed: the session converts one into a
+        /// DispatchFailure fault rather than ignoring it, so a fake that ate it
+        /// would hide the very escape a subscriber is expected to prevent.</para>
+        /// </summary>
+        public void PublishToSubscribers(MessageId messageId, object payload)
+        {
+            if (!subscribers.TryGetValue(messageId, out var handlers))
+            {
+                return;
+            }
+
+            foreach (var handler in handlers.ToArray())
+            {
+                handler(payload);
+            }
+        }
+
+        /// <summary>How many handlers are currently subscribed to that id.</summary>
+        public int SubscriberCount(MessageId messageId) =>
+            subscribers.TryGetValue(messageId, out var handlers) ? handlers.Count : 0;
 
         public IDisposable SubscribeToFaults(Action<SessionFault> handler)
         {

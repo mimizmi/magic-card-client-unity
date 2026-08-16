@@ -26,5 +26,34 @@
                 <ui:DataBinding property="text" data-source-path="ConnectionFaultText" binding-mode="ToTarget" />
             </Bindings>
         </ui:Label>
+        <!--
+            The queue panel. Every binding below resolves against THIS element's
+            dataSource, not the root's: LoginView assigns a QueueViewModel to
+            'queue-root', and UI Toolkit resolves a data-source-path against the
+            nearest ancestor that has one. That is what lets two view-models share
+            one document without either one growing the other's properties.
+        -->
+        <ui:VisualElement name="queue-root" style="margin-top: 24px; align-items: stretch;">
+            <ui:Label name="queue-status" style="white-space: normal; font-size: 30px; -unity-text-align: middle-center;">
+                <Bindings>
+                    <ui:DataBinding property="text" data-source-path="QueueStatusText" binding-mode="ToTarget" />
+                </Bindings>
+            </ui:Label>
+            <ui:Button name="join-queue" text="Find match" style="font-size: 30px;">
+                <Bindings>
+                    <ui:DataBinding property="enabledSelf" data-source-path="CanJoin" binding-mode="ToTarget" />
+                </Bindings>
+            </ui:Button>
+            <ui:Button name="leave-queue" text="Cancel" style="font-size: 30px;">
+                <Bindings>
+                    <ui:DataBinding property="enabledSelf" data-source-path="CanLeave" binding-mode="ToTarget" />
+                </Bindings>
+            </ui:Button>
+            <ui:Label name="match" style="white-space: normal; font-size: 30px; -unity-font-style: bold; -unity-text-align: middle-center;">
+                <Bindings>
+                    <ui:DataBinding property="text" data-source-path="MatchText" binding-mode="ToTarget" />
+                </Bindings>
+            </ui:Label>
+        </ui:VisualElement>
     </ui:VisualElement>
 </ui:UXML>

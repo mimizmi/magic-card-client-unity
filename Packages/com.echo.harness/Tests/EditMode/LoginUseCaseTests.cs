@@ -11,22 +11,32 @@ namespace Echo.Harness.Tests.EditMode
 {
     public sealed class LoginUseCaseTests
     {
-        private static (LoginUseCase UseCase, FakeProtocolSession Session) Build()
+        private static (LoginUseCase UseCase, FakeProtocolSession Session, CurrentPlayer Player)
+            Build()
         {
             var session = new FakeProtocolSession();
-            return (new LoginUseCase(session), session);
+            var player = new CurrentPlayer();
+            return (new LoginUseCase(session, player), session, player);
         }
 
         [Test]
         public void ConstructingWithoutASessionThrows()
         {
-            Assert.Throws<ArgumentNullException>(() => new LoginUseCase(null));
+            Assert.Throws<ArgumentNullException>(
+                () => new LoginUseCase(null, new CurrentPlayer()));
+        }
+
+        [Test]
+        public void ConstructingWithoutACurrentPlayerThrows()
+        {
+            Assert.Throws<ArgumentNullException>(
+                () => new LoginUseCase(new FakeProtocolSession(), null));
         }
 
         [Test]
         public void ASuccessfulResponseBecomesSucceededWithThePlayerId()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextResponse = new LoginResponseDto
             {
                 Success = true,
@@ -50,7 +60,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void AnUnsuccessfulResponseBecomesRejectedCarryingTheServersReason()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextResponse = new LoginResponseDto
             {
                 Success = false,
@@ -68,7 +78,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ARefusalWithNoReasonStillSaysSomething()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextResponse = new LoginResponseDto { Success = false, Error = null };
 
             var outcome = useCase
@@ -82,7 +92,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ATimeoutBecomesNoAnswerRatherThanEscaping()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextRequestFailure = new TimeoutException("no LoginResponse");
 
             var outcome = useCase
@@ -95,7 +105,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ASecondLoginInFlightBecomesNoAnswerRatherThanEscaping()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextRequestFailure = new RequestAlreadyInFlightException(
                 MessageId.LoginResponse, "already in flight");
 
@@ -111,7 +121,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ACancellationEscapesRatherThanBecomingAnOutcome()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextRequestFailure = new OperationCanceledException();
 
             Assert.Throws<OperationCanceledException>(() =>
@@ -122,7 +132,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void AnUnexpectedFailureEscapes()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
             session.NextRequestFailure = new InvalidOperationException("the stream desynchronized");
 
             Assert.Throws<InvalidOperationException>(() =>
@@ -132,7 +142,7 @@ namespace Echo.Harness.Tests.EditMode
         [Test]
         public void ABlankPlayerNameIsRefusedWithoutTouchingTheSession()
         {
-            var (useCase, session) = Build();
+            var (useCase, session, _) = Build();
 
             var outcome = useCase
                 .LoginAsync("   ", CancellationToken.None)
@@ -140,6 +150,56 @@ namespace Echo.Harness.Tests.EditMode
 
             Assert.That(outcome.Result, Is.EqualTo(LoginResult.Rejected));
             Assert.That(session.RequestCount, Is.Zero);
+        }
+
+        // The player id has two readers now, and they are not the same claim. The
+        // outcome's is what the login screen renders once; CurrentPlayer's is what
+        // the queue path reads later, when the outcome is long gone.
+        [Test]
+        public void ASuccessfulLoginRecordsThePlayerForLaterCallers()
+        {
+            var (useCase, session, player) = Build();
+            session.NextResponse = new LoginResponseDto { Success = true, PlayerId = "player-7" };
+
+            useCase.LoginAsync("ada", CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.That(player.IsLoggedIn, Is.True);
+            Assert.That(player.PlayerId, Is.EqualTo("player-7"));
+        }
+
+        [Test]
+        public void ARefusedLoginLeavesTheCurrentPlayerUnset()
+        {
+            var (useCase, session, player) = Build();
+            session.NextResponse = new LoginResponseDto
+            {
+                Success = false,
+                Error = "name already taken",
+            };
+
+            useCase.LoginAsync("ada", CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.That(player.IsLoggedIn, Is.False);
+            Assert.That(player.PlayerId, Is.Null);
+        }
+
+        // A success carrying no player id is a decode failure wearing a success
+        // flag. Recording it would make IsLoggedIn true with nothing to identify,
+        // and the queue's wire field would then carry the empty string as though
+        // that were the answer.
+        [Test]
+        public void ASuccessWithNoPlayerIdDoesNotClaimTheClientIsLoggedIn()
+        {
+            var (useCase, session, player) = Build();
+            session.NextResponse = new LoginResponseDto { Success = true, PlayerId = string.Empty };
+
+            var outcome = useCase.LoginAsync("ada", CancellationToken.None)
+                .GetAwaiter().GetResult();
+
+            Assert.That(outcome.Result, Is.EqualTo(LoginResult.Succeeded),
+                "The outcome still reports what the server said; only the recorded " +
+                "identity is withheld.");
+            Assert.That(player.IsLoggedIn, Is.False);
         }
 
         // The reconnect token is never read from the response at all - "dropped"

@@ -75,6 +75,9 @@ namespace Echo.Harness.Tests.PlayMode
             using var router = new SessionFaultRouter(
                 session, new RecordingSessionScheduler(), new RecordingFaultLog());
             using var viewModel = new LoginViewModel(status, login, router);
+            using var watcher = new MatchFoundWatcher(session);
+            using var queueViewModel = new QueueViewModel(
+                status, new CurrentPlayer(), new FakeQueueUseCase(), watcher);
 
             var panelSettings = ScriptableObject.CreateInstance<PanelSettings>();
             var host = new GameObject(
@@ -90,17 +93,26 @@ namespace Echo.Harness.Tests.PlayMode
                 var document = host.AddComponent<UIDocument>();
                 document.panelSettings = panelSettings;
 
-                // The button LoginView.Start() queries for by name, built by
+                // The elements LoginView.Start() queries for by name, built by
                 // hand rather than loaded from Login.uxml - LoginLayoutTests
-                // already pins that the real asset carries this element and a
-                // real binding on it; this test is only about LoginView's own
+                // already pins that the real asset carries them and real
+                // bindings on them; this test is only about LoginView's own
                 // wiring, not the layout.
                 var submit = new Button { name = "submit" };
                 document.rootVisualElement.Add(submit);
 
+                // The queue panel is built here even though this test asserts
+                // nothing about it, because LoginView.BindQueuePanel logs an
+                // ERROR when 'queue-root' is missing - and an unhandled
+                // Debug.LogError fails a Unity test. Omitting it would make this
+                // test fail for a reason that has nothing to do with what it
+                // measures.
+                document.rootVisualElement.Add(BuildQueuePanel());
+
                 var view = host.AddComponent<LoginView>();
                 SetPrivateField(view, "document", document);
                 SetPrivateField(view, "viewModel", viewModel);
+                SetPrivateField(view, "queueViewModel", queueViewModel);
 
                 // LoginView.Start runs before the next Update, so one frame is
                 // enough for it to have wired the document.
@@ -126,6 +138,88 @@ namespace Echo.Harness.Tests.PlayMode
                 Object.Destroy(host);
                 Object.Destroy(panelSettings);
             }
+        }
+
+        /// <summary>
+        /// The queue panel's half of the same wiring, and one thing the login half
+        /// cannot show: the queue view-model is bound to <c>queue-root</c> rather
+        /// than to the document root. That depth is what lets two view-models share
+        /// one document, so binding it at the root instead would silently hand the
+        /// queue bindings the login view-model to resolve against.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator StartBindsTheQueuePanelAndItsButtonsReachTheQueueViewModel()
+        {
+            var status = new FakeSessionStatus { State = SessionState.Connected };
+            var session = new FakeProtocolSession();
+            var player = new CurrentPlayer();
+            player.RecordLogin("player-7");
+            var queue = new FakeQueueUseCase();
+            using var router = new SessionFaultRouter(
+                session, new RecordingSessionScheduler(), new RecordingFaultLog());
+            using var viewModel = new LoginViewModel(status, new FakeLoginUseCase(), router);
+            using var watcher = new MatchFoundWatcher(session);
+            using var queueViewModel = new QueueViewModel(status, player, queue, watcher);
+
+            var panelSettings = ScriptableObject.CreateInstance<PanelSettings>();
+            var host = new GameObject(
+                nameof(StartBindsTheQueuePanelAndItsButtonsReachTheQueueViewModel));
+            try
+            {
+                var document = host.AddComponent<UIDocument>();
+                document.panelSettings = panelSettings;
+                document.rootVisualElement.Add(new Button { name = "submit" });
+
+                var queueRoot = BuildQueuePanel();
+                document.rootVisualElement.Add(queueRoot);
+
+                var view = host.AddComponent<LoginView>();
+                SetPrivateField(view, "document", document);
+                SetPrivateField(view, "viewModel", viewModel);
+                SetPrivateField(view, "queueViewModel", queueViewModel);
+
+                yield return null;
+
+                Assert.That(
+                    queueRoot.dataSource,
+                    Is.SameAs(queueViewModel),
+                    "The queue view-model must be bound to 'queue-root', not to the root.");
+                Assert.That(
+                    document.rootVisualElement.dataSource,
+                    Is.SameAs(viewModel),
+                    "Binding the queue panel must not disturb the login binding.");
+
+                SimulateClick(queueRoot.Q<Button>("join-queue"));
+                yield return null;
+
+                Assert.That(queue.JoinCount, Is.EqualTo(1),
+                    "Clicking 'join-queue' must reach QueueViewModel.JoinAsync.");
+
+                SimulateClick(queueRoot.Q<Button>("leave-queue"));
+                yield return null;
+
+                Assert.That(queue.LeaveCount, Is.EqualTo(1),
+                    "Clicking 'leave-queue' must reach QueueViewModel.LeaveAsync.");
+            }
+            finally
+            {
+                Object.Destroy(host);
+                Object.Destroy(panelSettings);
+            }
+        }
+
+        /// <summary>
+        /// The four names LoginView.BindQueuePanel queries for. Kept in one place
+        /// so a rename breaks both tests at once rather than one of them silently.
+        /// </summary>
+        private static VisualElement BuildQueuePanel()
+        {
+            var queueRoot = new VisualElement { name = "queue-root" };
+            queueRoot.Add(new Label { name = "queue-status" });
+            queueRoot.Add(new Button { name = "join-queue" });
+            queueRoot.Add(new Button { name = "leave-queue" });
+            queueRoot.Add(new Label { name = "match" });
+            return queueRoot;
         }
 
         private static void SetPrivateField(object target, string fieldName, object value)
