@@ -260,6 +260,234 @@ namespace Echo.Harness.Tests.EditMode
         }
 
         /// <summary>
+        /// The queue's refusal path, over a real socket. It needs no second client
+        /// and no match: a session that has not logged in is refused by name, and
+        /// that string is the contract this asserts.
+        ///
+        /// <para>Worth having on its own because it is the one queue answer a
+        /// single connection can provoke deterministically. It also pins the
+        /// direction of <c>QueueUseCase</c>'s conversion: the server says
+        /// <c>success:false</c> with a reason, and a client that mapped that to
+        /// anything but <c>Rejected</c> would show the player a network error for
+        /// what is really "log in first".</para>
+        /// </summary>
+        [UnityTest]
+        public IEnumerator JoiningTheQueueWithoutLoggingInIsRefusedByTheServer()
+        {
+            var endpoint = RequireEndpoint();
+            return UniTask.ToCoroutine(async () =>
+            {
+                var (transport, session) = await StartSessionAsync(endpoint);
+                using (transport)
+                using (session)
+                {
+                    var useCase = new QueueUseCase(session);
+
+                    var outcome = await useCase.JoinAsync(
+                        "never-logged-in", CancellationToken.None);
+
+                    Assert.That(outcome.Result, Is.EqualTo(QueueResult.Rejected),
+                        "The server refuses a queue request from a session it has no " +
+                        "player for; anything else means our reading of JoinQueueResp " +
+                        "disagrees with the server's.");
+                    Assert.That(outcome.Message, Does.Contain("not logged in"),
+                        "matchmaking.go handleJoinQueue writes this reason verbatim.");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 2003 LeaveQueueRequest carries no body and gets no reply, so nothing
+        /// about it is directly observable. What this proves is the half that can
+        /// fail invisibly: the server accepts a frame whose payload length is zero
+        /// and the link stays usable afterwards.
+        ///
+        /// <para>That is not a formality. <c>LeaveQueueRequest</c> is payload-shape
+        /// "none", so the client writes a 4-byte length of 0 followed by the message
+        /// id and no body. A client that instead sent <c>{}</c>, or a server that
+        /// mis-framed an empty payload, would desynchronize the stream - and because
+        /// there is no reply to wait on, the damage would only surface on some later
+        /// unrelated message. The round trip afterwards is what catches it.</para>
+        ///
+        /// <para><b>The watcher below is not decoration, and this test failed
+        /// without it.</b> Joining a queue on a shared server can be answered by a
+        /// match at any moment - another client only has to be waiting - and a
+        /// MatchFoundEvent with no subscriber publishes a <c>NoDestination</c>
+        /// fault. Measured: the first run of this test was matched by a waiting
+        /// player and failed on its own empty-faults assertion. That is the same
+        /// rule <c>MatchFoundWatcherEntryPoint</c> enforces in production - a client
+        /// that queues must have a 2004 subscriber - and this test was breaking it.
+        /// Being matched is therefore tolerated rather than prevented: it changes
+        /// nothing about the framing property being measured, and a test that
+        /// demanded not to be matched would be asserting something the protocol
+        /// does not promise.</para>
+        /// </summary>
+        [UnityTest]
+        public IEnumerator LeavingTheQueueIsAcceptedAndLeavesTheLinkUsable()
+        {
+            var endpoint = RequireEndpoint();
+            return UniTask.ToCoroutine(async () =>
+            {
+                var (transport, session) = await StartSessionAsync(endpoint);
+                using (transport)
+                using (session)
+                {
+                    var faults = new List<SessionFault>();
+                    session.SubscribeToFaults(faults.Add);
+
+                    // Before the join, for the reason in the summary and the same
+                    // reason production builds one before login.
+                    using var watcher = new MatchFoundWatcher(session);
+
+                    var player = await LogInAsync(session, "unity-harness-e2e-leave");
+                    var useCase = new QueueUseCase(session);
+                    await useCase.JoinAsync(player, CancellationToken.None);
+
+                    await useCase.LeaveAsync(CancellationToken.None);
+
+                    // The assertion the test is named for. A desynchronized stream
+                    // fails here rather than at the send, because the send is
+                    // fire-and-forget and the server never answers it.
+                    var latency = await session.ProbeRoundTripAsync(CancellationToken.None);
+                    Assert.That(latency, Is.GreaterThan(TimeSpan.Zero),
+                        "A bodyless LeaveQueueRequest must leave the frame stream intact.");
+                    Assert.That(session.State, Is.EqualTo(SessionState.Connected));
+                    Assert.That(faults, Is.Empty,
+                        "Faults: " + string.Join("; ", faults.ConvertAll(f => f.Diagnostic)));
+                }
+            });
+        }
+
+        /// <summary>
+        /// The whole slice, end to end: two real connections queue and the server
+        /// pairs them with each other.
+        ///
+        /// <para>Two clients rather than one, because a match is the one thing a
+        /// single connection cannot provoke - the server's <c>tryMatch</c> needs two
+        /// waiting players (matchmaking.go). This is therefore the only test in the
+        /// repository that can disagree with our reading of 2004 MatchFoundEvent;
+        /// every other match in the suite is one we published into a fake
+        /// ourselves.</para>
+        ///
+        /// <para><b>It also proves the subscription timing that
+        /// <c>MatchFoundWatcher</c> exists for.</b> Both watchers are constructed
+        /// before either client logs in, which is the ordering the reconnect path
+        /// forces; a watcher built after the join would be racing the server's
+        /// pairing, and on a fast link would lose.</para>
+        ///
+        /// <para><b>Assumption, stated because it is a real flakiness risk:</b> the
+        /// server is shared and its queue is global, so a third player queueing at
+        /// the same moment could be paired with one of these two instead. The
+        /// cross-assertions below fail loudly if that happens rather than passing
+        /// vacuously. It has not been observed on this project's development
+        /// server - but a green run here is evidence about a quiet server as much
+        /// as about the protocol.</para>
+        /// </summary>
+        [UnityTest]
+        [Timeout(60000)]
+        public IEnumerator TwoQueueingClientsAreMatchedWithEachOther()
+        {
+            var endpoint = RequireEndpoint();
+            return UniTask.ToCoroutine(async () =>
+            {
+                var (transportA, sessionA) = await StartSessionAsync(endpoint);
+                using (transportA)
+                using (sessionA)
+                {
+                    var (transportB, sessionB) = await StartSessionAsync(endpoint);
+                    using (transportB)
+                    using (sessionB)
+                    {
+                        // Before either login, deliberately. See the summary.
+                        using var watcherA = new MatchFoundWatcher(sessionA);
+                        using var watcherB = new MatchFoundWatcher(sessionB);
+
+                        const string nameA = "unity-harness-e2e-a";
+                        const string nameB = "unity-harness-e2e-b";
+                        var playerA = await LogInAsync(sessionA, nameA);
+                        var playerB = await LogInAsync(sessionB, nameB);
+
+                        var queueA = new QueueUseCase(sessionA);
+                        var queueB = new QueueUseCase(sessionB);
+
+                        var joinedA = await queueA.JoinAsync(playerA, CancellationToken.None);
+                        Assert.That(joinedA.Result, Is.EqualTo(QueueResult.Joined),
+                            joinedA.Message);
+
+                        var joinedB = await queueB.JoinAsync(playerB, CancellationToken.None);
+                        Assert.That(joinedB.Result, Is.EqualTo(QueueResult.Joined),
+                            joinedB.Message);
+
+                        await WaitUntilAsync(
+                            () => watcherA.Latest.HasValue && watcherB.Latest.HasValue,
+                            "Both clients queued, so the server's tryMatch had two waiting " +
+                            "players and must have paired them. A MatchFoundEvent did not " +
+                            "arrive on both connections within the deadline.");
+
+                        var matchA = watcherA.Latest.Value;
+                        var matchB = watcherB.Latest.Value;
+
+                        Assert.That(matchA.GameId, Is.Not.Null.And.Not.Empty);
+                        Assert.That(matchB.GameId, Is.EqualTo(matchA.GameId),
+                            "Both clients must be told about the SAME room. A mismatch " +
+                            "means each was paired with someone else - see this test's " +
+                            "shared-server assumption.");
+
+                        // The seats are randomised per pairing (matchmaking.go
+                        // tryMatch), so which client gets which is not assertable -
+                        // only that they differ and cover both.
+                        Assert.That(new[] { matchA.Seat, matchB.Seat },
+                            Is.EquivalentTo(new[] { 0, 1 }),
+                            "One client acts first and the other second; two clients " +
+                            "sharing a seat would be a server-side pairing bug.");
+
+                        Assert.That(matchA.OpponentName, Is.EqualTo(nameB));
+                        Assert.That(matchB.OpponentName, Is.EqualTo(nameA),
+                            "Each client is told the OTHER player's name. Seeing its own " +
+                            "would mean the server echoed the recipient back.");
+                    }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Logs in and returns the server-issued player id, failing the test rather
+        /// than returning a useless value when the server refuses.
+        /// </summary>
+        private static async UniTask<string> LogInAsync(ProtocolSession session, string playerName)
+        {
+            var response = await session.RequestAsync<LoginResponseDto>(
+                MessageId.LoginRequest,
+                new LoginRequestDto { PlayerName = playerName },
+                Patience,
+                CancellationToken.None);
+
+            Assert.That(response.Success, Is.True, response.Error);
+            Assert.That(response.PlayerId, Is.Not.Null.And.Not.Empty);
+            return response.PlayerId;
+        }
+
+        /// <summary>
+        /// Polls until the condition holds or <see cref="Patience"/> runs out.
+        /// Polling rather than awaiting an event, because the thing being waited for
+        /// is a server push with no completion source on this side; the interval is
+        /// short enough to add no meaningful latency to a fast pairing.
+        /// </summary>
+        private static async UniTask WaitUntilAsync(Func<bool> condition, string message)
+        {
+            var deadline = DateTimeOffset.UtcNow + Patience;
+            while (!condition())
+            {
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    Assert.Fail($"{message} (waited {Patience})");
+                }
+
+                await UniTask.Delay(TimeSpan.FromMilliseconds(50), DelayType.Realtime);
+            }
+        }
+
+        /// <summary>
         /// Resolved before the coroutine is built rather than inside it. Assert.Ignore
         /// throws, and throwing from the test method itself is the shape the Unity
         /// runner handles cleanly; thrown from inside UniTask.ToCoroutine it would

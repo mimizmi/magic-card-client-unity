@@ -267,7 +267,33 @@ deliverable.
   Bootstrap — because Presentation may not reference VContainer and so cannot carry
   an `[Inject]` attribute. That cost was accepted rather than widening the
   reference list; see the design spec.
-- [ ] Implement queue and match-found flow.
+- [x] Implement queue and match-found flow. `QueueUseCase` sends 2001 and converts
+  2002 with `LoginUseCase`'s exception policy; 2003 is a bodyless fire-and-forget
+  send; `MatchFoundWatcher` owns the one production subscription to 2004 and
+  `QueueViewModel` drives a panel on the login screen. **Three things this
+  deliberately did not do.** Character selection (2005) and game start (2006) are
+  untouched, because choosing a character needs a character list and that means
+  4008/5011 — a dependency nothing has scoped. `CreateAiGameRequest` (2007) is
+  unsent, so the only route to a match is a real second player. And the panel
+  shares `Login.uxml` and `LoginView` rather than being its own screen, which is
+  what keeps the UI lifetime-scope decision below still deferred. **What the
+  server forced rather than what was chosen:** 2003 has no reply at all, so
+  leaving the queue is optimistic and can never be confirmed; and a match can
+  already be in flight when the player cancels, so `QueueViewModel` lets the match
+  win — see `QueueViewModelTests.AMatchArrivingAfterTheCancelStillWins`.
+  **`JoinQueueRequestDto.PlayerId` is sent and the server never reads it**
+  (`matchmaking.go handleJoinQueue` identifies the player by TCP session and its
+  `data` parameter is unused); it is populated because the Go struct declares it,
+  and that is the only reason.
+- [ ] Decide whether `CurrentPlayer` should survive a dropped link, and clear it if
+  not. It records the player id on a successful login and nothing invalidates it
+  afterwards, so `IsLoggedIn` keeps saying yes after a disconnect the server has
+  already acted on — it drops the session in `player/manager.go handleDisconnect`
+  and requires a fresh LoginRequest. This is harmless today only because nothing
+  reconnects: a faulted session stays down until something calls StopAsync and
+  StartAsync, and `QueueViewModel.CanJoin` also requires `SessionState.Connected`,
+  which does go false. Whoever lands "Add reconnect policy" above owns this, and
+  the two decisions are the same decision.
 - [ ] Start a local authoritative Go room and render one player-specific state.
 - [ ] Prove cancellation from view → session → transport.
 - [ ] Capture memory, allocation, startup, and package-size baselines.

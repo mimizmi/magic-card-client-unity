@@ -40,9 +40,22 @@ namespace Echo.Harness.Application
         public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
         private readonly IProtocolSession session;
+        private readonly CurrentPlayer currentPlayer;
 
-        public LoginUseCase(IProtocolSession session) =>
+        /// <summary>
+        /// Takes the writable <see cref="CurrentPlayer"/> rather than
+        /// <see cref="ICurrentPlayer"/>, because writing it is the point. This is
+        /// its only writer, and the reason is on that type: a successful
+        /// LoginResponse is the one moment in the process where "we are now player
+        /// X" becomes true, so deriving it anywhere else would mean reconstructing
+        /// a fact that had already been thrown away.
+        /// </summary>
+        public LoginUseCase(IProtocolSession session, CurrentPlayer currentPlayer)
+        {
             this.session = session ?? throw new ArgumentNullException(nameof(session));
+            this.currentPlayer = currentPlayer
+                ?? throw new ArgumentNullException(nameof(currentPlayer));
+        }
 
         public async UniTask<LoginOutcome> LoginAsync(
             string playerName,
@@ -86,6 +99,17 @@ namespace Echo.Harness.Application
             // name. A static field or a log line elsewhere would satisfy it
             // just as well - it does not, and cannot, prove this method never
             // reads the DTO field.
+            if (response.Success)
+            {
+                // Recorded before the outcome is returned, so that anything the
+                // caller does on seeing Succeeded - queueing, in the flow this
+                // slice adds - already sees a logged-in player. The write is
+                // deliberately not undone on a later failure: see CurrentPlayer
+                // for why nothing here invalidates it, and who owns that when
+                // reconnect lands.
+                currentPlayer.RecordLogin(response.PlayerId);
+            }
+
             return response.Success
                 ? LoginOutcome.Success(response.PlayerId, response.InGame)
                 : LoginOutcome.Refusal(

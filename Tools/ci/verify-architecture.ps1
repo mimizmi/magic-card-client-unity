@@ -377,6 +377,13 @@ Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<HarnessSessionDriver>
     'HarnessLifetimeScope must register the session driver as an entry point.'
 Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<SessionFaultRouterEntryPoint>') `
     'HarnessLifetimeScope must register the fault router entry point, or no fault is ever read.'
+Assert-True ($LifetimeScopeText -match 'RegisterEntryPoint<MatchFoundWatcherEntryPoint>') `
+    ('HarnessLifetimeScope must register the match-found watcher entry point, or ' +
+        'nothing subscribes to 2004 MatchFoundEvent. The failure is the same shape ' +
+        'as the fault router line above and just as silent: the watcher stays ' +
+        'registered, is never constructed, every match the server sends becomes a ' +
+        'NoDestination fault, and every test still passes because each one builds ' +
+        'its own watcher directly.')
 
 $Contract = Get-Content -Raw -LiteralPath (
     Join-Path $ProjectRoot 'Packages\com.echo.harness\Fixtures\protocol.contract.json') |

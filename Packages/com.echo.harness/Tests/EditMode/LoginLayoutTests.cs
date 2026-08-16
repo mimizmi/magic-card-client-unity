@@ -35,6 +35,70 @@ namespace Echo.Harness.Tests.EditMode
             AssertBound(root, "submit", "enabledSelf");
             AssertBound(root, "result", "text");
             AssertBound(root, "connection-fault", "text");
+
+            AssertBound(root, "queue-status", "text");
+            AssertBound(root, "join-queue", "enabledSelf");
+            AssertBound(root, "leave-queue", "enabledSelf");
+            AssertBound(root, "match", "text");
+        }
+
+        /// <summary>
+        /// The queue panel binds against its OWN data source - LoginView assigns a
+        /// QueueViewModel to 'queue-root' - so that element has to exist and has to
+        /// be the ancestor of the queue bindings. Without the container element the
+        /// four bindings above would resolve against the root's LoginViewModel,
+        /// find no such properties, and silently render nothing.
+        /// </summary>
+        [Test]
+        public void TheQueuePanelHasItsOwnContainerElement()
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
+            var root = asset.Instantiate();
+
+            var queueRoot = root.Q("queue-root");
+            Assert.That(queueRoot, Is.Not.Null,
+                "'queue-root' did not import from Login.uxml; LoginView assigns the " +
+                "QueueViewModel to it by name.");
+
+            foreach (var name in new[] { "queue-status", "join-queue", "leave-queue", "match" })
+            {
+                Assert.That(queueRoot.Q(name), Is.Not.Null,
+                    $"'{name}' must sit UNDER 'queue-root', or its binding resolves " +
+                    "against the login view-model instead of the queue one.");
+            }
+        }
+
+        // The same copy-paste hazard the submit button's test covers: some
+        // DataBinding being present says nothing about which property it names,
+        // and the two queue buttons differ by exactly one path.
+        [Test]
+        public void TheQueueButtonsBindToTheirOwnGates()
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
+            var root = asset.Instantiate();
+
+            var join = (DataBinding)AssertBound(root, "join-queue", "enabledSelf");
+            var leave = (DataBinding)AssertBound(root, "leave-queue", "enabledSelf");
+
+            Assert.That(join.dataSourcePath, Is.EqualTo(new PropertyPath("CanJoin")));
+            Assert.That(leave.dataSourcePath, Is.EqualTo(new PropertyPath("CanLeave")));
+        }
+
+        // QueueStatusText and MatchText are separate for a reason the view-model
+        // states: one is what this client asked for, the other is what the server
+        // pushed, and either binding pointed at the other's property would let a
+        // cancellation erase the match that beat it.
+        [Test]
+        public void TheQueueLabelsBindToTheirOwnText()
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(LayoutPath);
+            var root = asset.Instantiate();
+
+            var status = (DataBinding)AssertBound(root, "queue-status", "text");
+            var match = (DataBinding)AssertBound(root, "match", "text");
+
+            Assert.That(status.dataSourcePath, Is.EqualTo(new PropertyPath("QueueStatusText")));
+            Assert.That(match.dataSourcePath, Is.EqualTo(new PropertyPath("MatchText")));
         }
 
         // A copy-pasted data-source-path (e.g. the button binding to

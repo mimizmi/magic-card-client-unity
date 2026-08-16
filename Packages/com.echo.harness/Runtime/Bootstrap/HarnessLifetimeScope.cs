@@ -33,6 +33,12 @@ namespace Echo.Harness.Bootstrap
             // the router is registered and never constructed, and nothing fails.
             builder.RegisterEntryPoint<SessionFaultRouterEntryPoint>();
 
+            // The same trap, one message along. Without this line MatchFoundWatcher
+            // is registered and never constructed, so nothing subscribes to 2004
+            // and every match the server sends becomes a NoDestination fault -
+            // with the suite green throughout.
+            builder.RegisterEntryPoint<MatchFoundWatcherEntryPoint>();
+
             builder.RegisterComponentInHierarchy<LoginView>();
         }
     }
